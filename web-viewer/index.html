@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <title>Seguimiento en tiempo real</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+  <style>
+    html, body { height: 100%; margin: 0; }
+    #map { width: 100%; height: 100vh; }
+    .user-label {
+      background: rgba(255,255,255,0.9);
+      padding: 2px 6px;
+      border-radius: 8px;
+      border: 1px solid #ddd;
+      font-size: 12px;
+      font-weight: 600;
+    }
+    .legend {
+      position: absolute;
+      top: 12px;
+      right: 12px;
+      background: rgba(255,255,255,0.95);
+      border: 1px solid #ddd;
+      border-radius: 10px;
+      padding: 10px 12px;
+      box-shadow: 0 4px 14px rgba(0,0,0,0.08);
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+      max-width: 240px;
+    }
+    .legend h4 { margin: 0 0 8px; font-size: 14px; }
+    .legend .row {
+      display: flex; align-items: center; gap: 8px; margin: 4px 0;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .legend .dot {
+      width: 12px; height: 12px; border-radius: 50%;
+      flex: 0 0 12px; border: 1px solid #999;
+    }
+  </style>
+</head>
+<body>
+  <div id="map"></div>
+  <div class="legend" id="legend">
+    <h4>Dispositivos</h4>
+    <div id="legendRows"></div>
+  </div>
+
+  <script>
+    // ====== Mapa base ======
+    const map = L.map("map").setView([0, 0], 2);
+    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+      maxZoom: 19,
+      attribution: '&copy; OpenStreetMap'
+    }).addTo(map);
+
+    // Centrar en la ubicación del navegador (opcional)
+    if (navigator.geolocation) {
+      navigator.geolocation.getCurrentPosition(
+        (pos) => map.setView([pos.coords.latitude, pos.coords.longitude], 14),
+        () => {}, { enableHighAccuracy: true, timeout: 5000 }
+      );
+    }
+
+    // ====== Utilidades ======
+    function hashCode(str) {
+      let h = 0; for (let i = 0; i < str.length; i++) { h = (h << 5) - h + str.charCodeAt(i); h |= 0; }
+      return Math.abs(h);
+    }
+    const palette = [
+      "#e61e50","#f39c12","#27ae60","#2980b9","#8e44ad",
+      "#16a085","#d35400","#2c3e50","#c0392b","#7f8c8d",
+      "#9b59b6","#1abc9c","#34495e","#f1c40f","#e67e22"
+    ];
+    const colorOf = (id) => palette[ hashCode(id) % palette.length ];
+
+    // Estado por usuario: { marker, poly, latlngs[], color }
+    const tracks = new Map();
+    const MAX_POINTS = 500;
+    let firstFitDone = false;
+
+    // Leyenda
+    const legendRows = document.getElementById("legendRows");
+    function ensureLegendRow(id, color) {
+      const rowId = `legend-${id}`;
+      if (document.getElementById(rowId)) return;
+      const row = document.createElement("div");
+      row.className = "row";
+      row.id = rowId;
+      row.innerHTML = `<div class="dot" style="background:${color}"></div><div title="${id}">${id}</div>`;
+      legendRows.appendChild(row);
+    }
+
+    // ====== Socket.IO (mismo origen) ======
+    const socket = io(); // se conecta al servidor que sirve este HTML
+
+    socket.on("locationUpdate", (payload) => {
+      // payload esperado: { userId, lat, lon, ts }
+      const id = payload.userId || "anon";
+      const lat = Number(payload.lat), lon = Number(payload.lon);
+      if (!Number.isFinite(lat) || !Number.isFinite(lon)) return;
+
+      const color = tracks.get(id)?.color || colorOf(id);
+
+      // crear track si no existe
+      if (!tracks.has(id)) {
+        const marker = L.circleMarker([lat, lon], {
+          radius: 8, color, fillColor: color, fillOpacity: 0.9, weight: 2
+        }).addTo(map)
+          .bindTooltip(id, { permanent: true, direction: "top", className: "user-label" });
+
+        const poly = L.polyline([[lat, lon]], { color, weight: 4, opacity: 0.85 }).addTo(map);
+
+        tracks.set(id, { marker, poly, latlngs: [[lat, lon]], color });
+        ensureLegendRow(id, color);
+
+        // primer encuadre: que se vean todos los marcadores
+        if (!firstFitDone) {
+          const group = L.featureGroup([...tracks.values()].map(t => t.marker));
+          map.fitBounds(group.getBounds().pad(0.2), { maxZoom: 16 });
+          firstFitDone = true;
+        }
+      } else {
+        // actualizar existentes
+        const t = tracks.get(id);
+        t.marker.setLatLng([lat, lon]);
+        t.latlngs.push([lat, lon]);
+        if (t.latlngs.length > MAX_POINTS) t.latlngs.shift();
+        t.poly.setLatLngs(t.latlngs);
+      }
+
+      // (opcional) auto-pan suave hacia el último que se mueve
+      // map.panTo([lat, lon], { animate: true, duration: 0.5 });
+    });
+  </script>
+</body>
+</html>
