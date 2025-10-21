@@ -9,7 +9,7 @@ import MapView, { Marker, Polyline } from "react-native-maps";
 import { io } from "socket.io-client";
 import { v4 as uuidv4 } from "uuid";
 
-const SERVER_URL = "http://192.168.100.73:4002";
+const SERVER_URL = "http://nv7rcq6fmp.loclx.io";
 
 // Comprobar si el dispositivo se mueve o no
 const MIN_MOVE_METERS = 7;     // umbral de movimiento

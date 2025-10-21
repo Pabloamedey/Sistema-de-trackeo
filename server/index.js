@@ -105,8 +105,8 @@ ioHttps.on("connection", (socket) => {
 // registrar /location en HTTPS también (útil para pruebas desde el visor)
 app.post("/location", handleLocation);
 
-httpsServer.listen(4000, () => {
-  console.log(`🔒 HTTPS on https://${IP}:4000`);
+httpsServer.listen(9876, () => {
+  console.log(`🔒 HTTPS on https://${IP}:9876`);
 });
 
 // ==== App HTTP (API para la app móvil) ====
@@ -129,7 +129,7 @@ appHttp.get("/", (_req, res) => {
   res.send(`
     <html>
       <head>
-        <meta http-equiv="refresh" content="2;url=https://${IP}:4000/">
+        <meta http-equiv="refresh" content="2;url=https://${IP}:9876/">
         <title>Redirigiendo...</title>
         <style>
           body {
@@ -155,7 +155,7 @@ appHttp.get("/", (_req, res) => {
       <body>
         <div class="box">
           <h2>🔒 Redirigiendo al visor seguro...</h2>
-          <p>Si no ocurre automáticamente, <a href="https://${IP}:4000/">hacé clic acá</a>.</p>
+          <p>Si no ocurre automáticamente, <a href="https://${IP}:9876/">hacé clic acá</a>.</p>
         </div>
       </body>
     </html>
@@ -166,10 +166,10 @@ const httpServer = http.createServer(appHttp);
 ioHttp = new IOServer(httpServer, { cors: { origin: "*" } });
 
 ioHttp.on("connection", (socket) => {
-  console.log("Dispositivo conectado (HTTP 4002):", socket.id);
+  console.log("Dispositivo conectado (HTTP 9878):", socket.id);
   if (lastLocation) socket.emit("locationUpdate", lastLocation);
 });
 
-httpServer.listen(4002, () => {
-  console.log(`🌐 HTTP (app) on http://${IP}:4002`);
+httpServer.listen(9878, "0.0.0.0", () => {
+  console.log(`🌐 HTTP (app) on http://${IP}:9878`);
 });
