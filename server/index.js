@@ -1,3 +1,5 @@
+import os from "os";
+import selfsigned from "selfsigned";
 import fs from "fs";
 import path from "path";
 import http from "http";
@@ -7,6 +9,79 @@ import cors from "cors";
 import { Server as IOServer } from "socket.io";
 import { spawn } from "child_process";
 import { fileURLToPath } from "url";
+import { v4 as uuidv4 } from "uuid";
+
+function getLocalIPv4() {
+  const nets = os.networkInterfaces();
+  for (const name of Object.keys(nets)) {
+    for (const net of nets[name]) {
+      if (net.family === "IPv4" && !net.internal) {
+        // ignorá VPNs o interfaces virtuales si querés filtrarlas por name
+        return net.address;
+      }
+    }
+  }
+  // fallback
+  return "127.0.0.1";
+}
+
+function ensureCertsAndCreds() {
+  const ip = getLocalIPv4();
+  const certDir = path.resolve(process.cwd(), "certs");
+  if (!fs.existsSync(certDir)) fs.mkdirSync(certDir, { recursive: true });
+
+  const keyPath = path.join(certDir, `${ip}-key.pem`);
+  const certPath = path.join(certDir, `${ip}.pem`);
+  const credPath = path.resolve(process.cwd(), "server-cred.json");
+
+  // si ya existen, devolvémoslos
+  if (fs.existsSync(keyPath) && fs.existsSync(certPath) && fs.existsSync(credPath)) {
+    const creds = JSON.parse(fs.readFileSync(credPath, "utf8"));
+    return { ip, keyPath, certPath, creds };
+  }
+
+  // generar certificado autofirmado con SANs: IP, localhost, 127.0.0.1
+  const attrs = [{ name: "commonName", value: ip }];
+  const opts = {
+    days: 3650,
+    keySize: 2048,
+    algorithm: "sha256",
+    extensions: [
+      {
+        name: "subjectAltName",
+        altNames: [
+          // tipo 2 = DNS, tipo 7 = IP
+          { type: 2, value: "localhost" },
+          { type: 7, ip: "127.0.0.1" },
+          { type: 7, ip: ip },
+        ],
+      },
+    ],
+  };
+
+  const pems = selfsigned.generate(attrs, opts);
+
+  fs.writeFileSync(keyPath, pems.private, { mode: 0o600 });
+  fs.writeFileSync(certPath, pems.cert, { mode: 0o644 });
+
+  const creds = {
+    id: uuidv4(),
+    createdAt: new Date().toISOString(),
+    ip,
+    key: keyPath,
+    cert: certPath,
+  };
+  fs.writeFileSync(credPath, JSON.stringify(creds, null, 2));
+
+  console.log("🔐 Credenciales generadas:");
+  console.log("  - server id:", creds.id);
+  console.log("  - cert:", certPath);
+  console.log("  - key:", keyPath);
+  console.log("  - ip detectada:", ip);
+
+  return { ip, keyPath, certPath, creds };
+}
+
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -36,8 +111,6 @@ function distanceMeters(a, b) {
 const SERVER_MIN_MOVE = 5;        // ignora cambios <5 m
 const SERVER_MAX_JUMP_SPEED = 200; // ignora saltos imposibles >200 m/s
 const SERVER_MIN_SECONDS = 1.0;   // ignora spam <1s si casi no hay movimiento
-
-const IP = "192.168.100.73";
 
 // ================== función para publicar dominio en Gist ==================
 function updateDiscoveryGist(url) {
@@ -90,6 +163,17 @@ function updateDiscoveryGist(url) {
 // ================== lanzar LocalXpose y publicar en Gist ==================
 function startLocalXposeAndCaptureUrl() {
   const BIN = process.platform === "win32" ? "loclx.exe" : "loclx";
+  const gui = spawn(BIN, ["gui"], { shell: true });
+  // Captura del puerto GUI de LocalXpose
+  gui.stdout.on("data", (buf) => {
+    const s = buf.toString();
+    process.stdout.write(`[loclx:gui] ${s}`);
+    const match = s.match(/http:\/\/localhost:(\d+)/);
+    if (match) {
+      const port = match[1];
+      console.log(`📟 LocalXpose GUI corriendo en: http://localhost:${port}\n`);
+    }
+  });
   const ports = [
     { port: 9876, label: "https-visor" },
     { port: 9878, label: "api-movil" },  // <— el que usará App.js
@@ -104,16 +188,18 @@ function startLocalXposeAndCaptureUrl() {
       // acepta “xxxxx.loclx.io” con o sin protocolo
       const m = s.match(/(?:https?:\/\/)?([a-z0-9][a-z0-9-]*\.loclx\.io)/i);
       if (!m) return;
-      const url = m[1].startsWith("http") ? m[1] : `https://${m[1]}`;
+      const url = m[1].startsWith("http") ? m[1] : `http://${m[1]}`;
 
       // si es el del 9878, actualizamos la que usa la app
       if (port === 9878 && url !== PUBLIC_TUNNEL_URL) {
         PUBLIC_TUNNEL_URL = url;
-        console.log(`Dominio principal (API móvil 9878): ${url}`);
+        console.log(`🌍 Dominio principal (API móvil 9878): ${url}\n`);
 
         // publicar automáticamente en Gist
         updateDiscoveryGist(url);
-
+      } else {
+        const fullUrl = `${url} → localhost:${port}\n`;
+        console.log(`🔗 Dominio ${label}: ${fullUrl}`);
       }
     };
     child.stdout.on("data", parse);
@@ -187,9 +273,12 @@ function handleLocation(req, res) {
 }
 
 // HTTPS (visor seguro + sockets)
+
+// uso: llamar antes de hacer https.createServer(...)
+const { ip: IP, keyPath, certPath } = ensureCertsAndCreds();
 const credentials = {
-  key: fs.readFileSync(path.resolve(__dirname, `./certs/${IP}+1-key.pem`)),
-  cert: fs.readFileSync(path.resolve(__dirname, `./certs/${IP}+1.pem`)),
+  key: fs.readFileSync(keyPath),
+  cert: fs.readFileSync(certPath),
 };
 const httpsServer = https.createServer(credentials, app);
 ioHttps = new IOServer(httpsServer, { cors: { origin: "*" } });
@@ -203,7 +292,7 @@ ioHttps.on("connection", (socket) => {
 app.post("/location", handleLocation);
 
 httpsServer.listen(9876, () => {
-  console.log(`🔒 HTTPS on https://${IP}:9876`);
+  console.log(`\n🔒 HTTPS on https://${IP}:9876`);
 });
 
 // ==== App HTTP (API para la app móvil) ====
@@ -283,5 +372,5 @@ ioHttp.on("connection", (socket) => {
 });
 
 httpServer.listen(9878, "0.0.0.0", () => {
-  console.log(`🌐 HTTP (app) on http://${IP}:9878`);
+  console.log(`\n🌐 HTTP (app) on http://${IP}:9878`);
 });

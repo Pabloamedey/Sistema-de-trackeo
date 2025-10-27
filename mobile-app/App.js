@@ -75,11 +75,21 @@ export default function App() {
 
   // asegura tener serverUrl (1) discovery público -> (2) cache
   async function ensureServerUrl() {
-    if (serverUrl) return serverUrl;
-    const dyn = await getDynamicServer();
-    if (dyn) { setServerUrl(dyn); return dyn; }
-    const cached = await AsyncStorage.getItem("serverUrl");
-    if (cached) { setServerUrl(cached); setStatusMsg(`🗂️ Usando cache: ${cached}`); return cached; }
+    let url = serverUrl;
+    if (url) return url;
+
+    for (let intento = 0; intento < 3; intento++) {
+      const nuevo = await getDynamicServer();
+      if (nuevo) {
+        await AsyncStorage.setItem("serverUrl", nuevo);
+        setServerUrl(nuevo);
+        return nuevo;
+      }
+      console.log("Reintentando discovery en 3s...");
+      await new Promise(res => setTimeout(res, 3000));
+    }
+
+    Alert.alert("No se pudo obtener el dominio del servidor");
     return null;
   }
 
@@ -188,7 +198,7 @@ export default function App() {
     // si aún no hay serverUrl, lo buscamos ahora
     const url = await ensureServerUrl();
     if (!url) {
-      Alert.alert("Servidor no disponible", "No pude descubrir el dominio. Revisá el Gist o la conexión.");
+      Alert.alert("Sin dominio disponible", "No se pudo conectar al servidor.");
       return;
     }
 
@@ -256,7 +266,7 @@ export default function App() {
 
         // enviar (por movimiento real o heartbeat)
         try {
-            await fetch(`${serverUrl}/location`, {
+            await fetch(`${url}/location`, {
               method: "POST",
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({
