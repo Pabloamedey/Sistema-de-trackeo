@@ -1,5 +1,4 @@
-import os from "os";
-import selfsigned from "selfsigned";
+// index.js — server + tunnels + gist (CERTS MANUALES)
 import fs from "fs";
 import path from "path";
 import http from "http";
@@ -9,92 +8,21 @@ import cors from "cors";
 import { Server as IOServer } from "socket.io";
 import { spawn } from "child_process";
 import { fileURLToPath } from "url";
-import { v4 as uuidv4 } from "uuid";
 
-function getLocalIPv4() {
-  const nets = os.networkInterfaces();
-  for (const name of Object.keys(nets)) {
-    for (const net of nets[name]) {
-      if (net.family === "IPv4" && !net.internal) {
-        // ignorá VPNs o interfaces virtuales si querés filtrarlas por name
-        return net.address;
-      }
-    }
-  }
-  // fallback
-  return "127.0.0.1";
-}
-
-function ensureCertsAndCreds() {
-  const ip = getLocalIPv4();
-  const certDir = path.resolve(process.cwd(), "certs");
-  if (!fs.existsSync(certDir)) fs.mkdirSync(certDir, { recursive: true });
-
-  const keyPath = path.join(certDir, `${ip}-key.pem`);
-  const certPath = path.join(certDir, `${ip}.pem`);
-  const credPath = path.resolve(process.cwd(), "server-cred.json");
-
-  // si ya existen, devolvémoslos
-  if (fs.existsSync(keyPath) && fs.existsSync(certPath) && fs.existsSync(credPath)) {
-    const creds = JSON.parse(fs.readFileSync(credPath, "utf8"));
-    return { ip, keyPath, certPath, creds };
-  }
-
-  // generar certificado autofirmado con SANs: IP, localhost, 127.0.0.1
-  const attrs = [{ name: "commonName", value: ip }];
-  const opts = {
-    days: 3650,
-    keySize: 2048,
-    algorithm: "sha256",
-    extensions: [
-      {
-        name: "subjectAltName",
-        altNames: [
-          // tipo 2 = DNS, tipo 7 = IP
-          { type: 2, value: "localhost" },
-          { type: 7, ip: "127.0.0.1" },
-          { type: 7, ip: ip },
-        ],
-      },
-    ],
-  };
-
-  const pems = selfsigned.generate(attrs, opts);
-
-  fs.writeFileSync(keyPath, pems.private, { mode: 0o600 });
-  fs.writeFileSync(certPath, pems.cert, { mode: 0o644 });
-
-  const creds = {
-    id: uuidv4(),
-    createdAt: new Date().toISOString(),
-    ip,
-    key: keyPath,
-    cert: certPath,
-  };
-  fs.writeFileSync(credPath, JSON.stringify(creds, null, 2));
-
-  console.log("🔐 Credenciales generadas:");
-  console.log("  - server id:", creds.id);
-  console.log("  - cert:", certPath);
-  console.log("  - key:", keyPath);
-  console.log("  - ip detectada:", ip);
-
-  return { ip, keyPath, certPath, creds };
-}
-
-
+// ================= rutas base =================
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// ==== Estado compartido ====
+// ================= estado compartido =================
 let lastLocation = null;
-let ioHttps; // se asignan luego de crear servers
-let ioHttp;
-let PUBLIC_TUNNEL_URL = null;
+let ioHttps; // sockets sobre 9876 (https)
+let ioHttp;  // sockets sobre 9878 (http)
+let PUBLIC_TUNNEL_URL = null; // dominio público (9878) publicado en Gist
 
-// Estado por usuario y helpers
+// mapa de última ubicación por usuario
 const lastByUser = new Map(); // userId -> { lat, lon, ts }
 
+// ================= helpers =================
 function distanceMeters(a, b) {
   const toRad = (v) => (v * Math.PI) / 180;
   const R = 6371000;
@@ -103,21 +31,32 @@ function distanceMeters(a, b) {
   const lat1 = toRad(a.lat);
   const lat2 = toRad(b.lat);
   const x =
-    Math.sin(dLat/2)**2 +
-    Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLon/2)**2;
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLon / 2) ** 2;
   return 2 * R * Math.asin(Math.sqrt(x));
 }
 
-const SERVER_MIN_MOVE = 5;        // ignora cambios <5 m
-const SERVER_MAX_JUMP_SPEED = 200; // ignora saltos imposibles >200 m/s
-const SERVER_MIN_SECONDS = 1.0;   // ignora spam <1s si casi no hay movimiento
+// filtros de servidor (anti-spam básicos)
+const SERVER_MIN_MOVE = 5;         // m mínimos entre muestras
+const SERVER_MAX_JUMP_SPEED = 200; // m/s anti-glitch
+const SERVER_MIN_SECONDS = 1.0;    // s mínimos entre muestras
 
-// ================== función para publicar dominio en Gist ==================
+// ======================= CERTS MANUALES =======================
+// CAMBIO: IP fija y lectura de certs/keys manuales (sin selfsigned)
+const IP = "192.168.100.73"; // <-- poné acá la IP local de la máquina
+const credentials = {
+  key: fs.readFileSync(path.resolve(__dirname, `./certs/${IP}-key.pem`)),
+  cert: fs.readFileSync(path.resolve(__dirname, `./certs/${IP}.pem`)),
+};
+// =============================================================
+
+
+// ================== publicar dominio en Gist (opcional) ==================
 function updateDiscoveryGist(url) {
   const GIST_ID = process.env.GIST_ID;
   const GIST_TOKEN = process.env.GIST_TOKEN;
   if (!GIST_ID || !GIST_TOKEN) {
-    console.warn("GIST_ID / GIST_TOKEN no seteados, omitiendo publicación");
+    console.warn("⚠️  GIST_ID / GIST_TOKEN no seteados, omitiendo publicación");
     return;
   }
 
@@ -147,36 +86,25 @@ function updateDiscoveryGist(url) {
       res.on("data", (c) => (buf += c));
       res.on("end", () => {
         if (res.statusCode >= 200 && res.statusCode < 300) {
-          console.log("Discovery Gist actualizado correctamente");
+          console.log("☁️  Discovery Gist actualizado correctamente");
         } else {
-          console.warn("Falló actualización Gist:", res.statusCode, buf);
+          console.warn("⚠️  Falló actualización Gist:", res.statusCode, buf);
         }
       });
     }
   );
 
-  req.on("error", (e) => console.warn("Error Gist:", e.message));
+  req.on("error", (e) => console.warn("⚠️  Error Gist:", e.message));
   req.write(body);
   req.end();
 }
 
-// ================== lanzar LocalXpose y publicar en Gist ==================
+// ================== LocalXpose: lanzar túneles y capturar URLs ==================
 function startLocalXposeAndCaptureUrl() {
   const BIN = process.platform === "win32" ? "loclx.exe" : "loclx";
-  const gui = spawn(BIN, ["gui"], { shell: true });
-  // Captura del puerto GUI de LocalXpose
-  gui.stdout.on("data", (buf) => {
-    const s = buf.toString();
-    process.stdout.write(`[loclx:gui] ${s}`);
-    const match = s.match(/http:\/\/localhost:(\d+)/);
-    if (match) {
-      const port = match[1];
-      console.log(`📟 LocalXpose GUI corriendo en: http://localhost:${port}\n`);
-    }
-  });
   const ports = [
     { port: 9876, label: "https-visor" },
-    { port: 9878, label: "api-movil" },  // <— el que usará App.js
+    { port: 9878, label: "api-movil" },
     { port: 8081, label: "expo" },
   ];
 
@@ -185,49 +113,71 @@ function startLocalXposeAndCaptureUrl() {
       const s = chunk.toString();
       process.stdout.write(`[loclx:${label}] ${s}`);
 
-      // acepta “xxxxx.loclx.io” con o sin protocolo
+      // Dominio público detectado en salida
       const m = s.match(/(?:https?:\/\/)?([a-z0-9][a-z0-9-]*\.loclx\.io)/i);
       if (!m) return;
+
+      // Si no trae protocolo, asumimos http:// (LocalXpose suele decir "(http, us)")
       const url = m[1].startsWith("http") ? m[1] : `http://${m[1]}`;
 
-      // si es el del 9878, actualizamos la que usa la app
+      // Log lindo con mapping a puerto local
+      const fullUrl = `${url} → localhost:${port}`;
       if (port === 9878 && url !== PUBLIC_TUNNEL_URL) {
         PUBLIC_TUNNEL_URL = url;
-        console.log(`🌍 Dominio principal (API móvil 9878): ${url}\n`);
+        console.log(`🌍 Dominio principal (API móvil 9878): ${fullUrl}`);
 
-        // publicar automáticamente en Gist
+        // publicar Gist para discovery externo
         updateDiscoveryGist(url);
       } else {
-        const fullUrl = `${url} → localhost:${port}\n`;
         console.log(`🔗 Dominio ${label}: ${fullUrl}`);
       }
+
+      // Detección del puerto del GUI (si ejecutás 'loclx gui' por separado y suelta la línea)
+      const guiMatch = s.match(/http:\/\/localhost:(\d+)/);
+      if (guiMatch) {
+        console.log(`📟 LocalXpose GUI: http://localhost:${guiMatch[1]}`);
+      }
     };
+
     child.stdout.on("data", parse);
-    child.stderr.on("data", parse); // LocalXpose suele escribir el status en stderr
+    child.stderr.on("data", parse);
   };
 
+  // lanzar túnel por puerto
   ports.forEach(({ port, label }) => {
     const args = ["tunnel", "http", "--to", `localhost:${port}`];
     const child = spawn(BIN, args, { shell: true });
     attachParsers(child, label, port);
     child.on("close", (code) => console.log(`[loclx:${label}] cerrado con código`, code));
   });
+
+  // (opcional) lanzar GUI — si lo usás, queda acá
+  try {
+    const gui = spawn(BIN, ["gui"], { shell: true });
+    gui.stdout.on("data", (buf) => {
+      const s = buf.toString();
+      process.stdout.write(`[loclx:gui] ${s}`);
+      const match = s.match(/http:\/\/localhost:(\d+)/);
+      if (match) console.log(`📟 LocalXpose GUI: http://localhost:${match[1]}`);
+    });
+    gui.stderr.on("data", (e) => process.stderr.write(`[loclx:gui:err] ${e}`));
+  } catch (_) {}
 }
 
-// === Iniciar LocalXpose automáticamente al arrancar ===
+// === Iniciar LocalXpose automáticamente ===
 startLocalXposeAndCaptureUrl();
 
-// ==== App HTTPS (visor) ====
+
+// ================== EXPRESS: HTTPS (visor) ==================
 const app = express();
 app.use(cors());
 app.use(express.json());
-app.use(express.static(path.resolve(__dirname, "../web-viewer"))); // servir visor (index.html) desde el mismo server
+app.use(express.static(path.resolve(__dirname, "../web-viewer")));
 
 app.get("/health", (_req, res) => res.send("OK"));
 
-// ---- Handler único /location (válido para ambos servers) ----
+// handler común /location
 function handleLocation(req, res) {
-  console.log("Body:", req.body);
   let { userId, lat, lon, ts } = req.body || {};
   lat = Number(lat);
   lon = Number(lon);
@@ -243,13 +193,12 @@ function handleLocation(req, res) {
 
   if (prev) {
     const dt = (ts - prev.ts) / 1000;
-    const d  = distanceMeters(prev, { lat, lon });
+    const d = distanceMeters(prev, { lat, lon });
 
-    // 1) ruido: movimiento muy chico y demasiado seguido
     if (d < SERVER_MIN_MOVE && dt < SERVER_MIN_SECONDS) {
       return res.send({ ok: true, skipped: "small_move" });
     }
-    // 2) glitch: salto imposible (por precisión mala)
+
     if (dt > 0 && d / dt > SERVER_MAX_JUMP_SPEED) {
       console.warn(`Salto anómalo de ${d.toFixed(1)} m en ${dt.toFixed(2)} s para ${id}, ignorado`);
       return res.send({ ok: true, skipped: "glitch" });
@@ -260,26 +209,13 @@ function handleLocation(req, res) {
   lastByUser.set(id, loc);
   lastLocation = loc;
 
-  // Emite a ambos canales
   ioHttps?.emit("locationUpdate", loc);
   ioHttp?.emit("locationUpdate", loc);
 
-  console.log(
-    `📥 ${id} -> ${lat.toFixed(6)}, ${lon.toFixed(6)} [${new Date(
-      ts
-    ).toLocaleTimeString()}]`
-  );
+  console.log(`📥 ${id} -> ${lat.toFixed(6)}, ${lon.toFixed(6)} [${new Date(ts).toLocaleTimeString()}]`);
   res.send({ ok: true });
 }
 
-// HTTPS (visor seguro + sockets)
-
-// uso: llamar antes de hacer https.createServer(...)
-const { ip: IP, keyPath, certPath } = ensureCertsAndCreds();
-const credentials = {
-  key: fs.readFileSync(keyPath),
-  cert: fs.readFileSync(certPath),
-};
 const httpsServer = https.createServer(credentials, app);
 ioHttps = new IOServer(httpsServer, { cors: { origin: "*" } });
 
@@ -288,79 +224,35 @@ ioHttps.on("connection", (socket) => {
   if (lastLocation) socket.emit("locationUpdate", lastLocation);
 });
 
-// registrar /location en HTTPS también (útil para pruebas desde el visor)
 app.post("/location", handleLocation);
 
 httpsServer.listen(9876, () => {
-  console.log(`\n🔒 HTTPS on https://${IP}:9876`);
+  console.log(`🔒 HTTPS on https://${IP}:9876`);
 });
 
-// ==== App HTTP (API para la app móvil) ====
+
+// ================== EXPRESS: HTTP (API móvil) ==================
 const appHttp = express();
-
 appHttp.use(express.json());
-
-// logger básico
 appHttp.use((req, _res, next) => {
   const ip = req.headers["x-forwarded-for"] || req.socket.remoteAddress;
-  console.log(`📡 HTTP ${req.method} ${req.url} <- ${ip} | ct=${req.headers["content-type"]}`);
+  console.log(`📡 HTTP ${req.method} ${req.url} <- ${ip}`);
   next();
 });
 
-// rutas API (misma lógica que HTTPS)
 appHttp.post("/location", handleLocation);
 appHttp.get("/health", (_req, res) => res.send("OK"));
-appHttp.get("/current-tunnel", (_req, res) => {
+
+// para discovery local (LAN)
+appHttp.get("/current-tunnel", (_req, res) => res.json({ server: PUBLIC_TUNNEL_URL }));
+
+// (opcional) JSON directo que refleja PUBLIC_TUNNEL_URL
+appHttp.get("/server-url.json", (_req, res) => {
   res.json({ server: PUBLIC_TUNNEL_URL });
 });
 
-// endpoint para servir el archivo con la URL actual
-appHttp.get("/server-url.json", (req, res) => {
-  const filePath = path.resolve(__dirname, "server-url.json");
-  if (fs.existsSync(filePath)) {
-    res.sendFile(filePath);
-  } else {
-    res.json({ server: null });
-  }
-});
-
-
-// landing con redirección bonita
 appHttp.get("/", (_req, res) => {
-  res.send(`
-    <html>
-      <head>
-        <meta http-equiv="refresh" content="2;url=https://${IP}:9876/">
-        <title>Redirigiendo...</title>
-        <style>
-          body {
-            font-family: Arial, sans-serif;
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            height: 100vh;
-            background: #fafafa;
-            margin: 0;
-          }
-          .box {
-            width: 360px;
-            text-align: center;
-            padding: 2rem;
-            border: 1px solid #ccc;
-            border-radius: 10px;
-            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
-            background: #fff;
-          }
-        </style>
-      </head>
-      <body>
-        <div class="box">
-          <h2>🔒 Redirigiendo al visor seguro...</h2>
-          <p>Si no ocurre automáticamente, <a href="https://${IP}:9876/">hacé clic acá</a>.</p>
-        </div>
-      </body>
-    </html>
-  `);
+  res.send(`<html><body><h2>Servidor móvil activo en puerto 9878</h2></body></html>`);
 });
 
 const httpServer = http.createServer(appHttp);
@@ -372,5 +264,5 @@ ioHttp.on("connection", (socket) => {
 });
 
 httpServer.listen(9878, "0.0.0.0", () => {
-  console.log(`\n🌐 HTTP (app) on http://${IP}:9878`);
+  console.log(`🌐 HTTP (app) on http://${IP}:9878`);
 });
