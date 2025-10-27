@@ -124,12 +124,12 @@ function startLocalXposeAndCaptureUrl() {
       const fullUrl = `${url} → localhost:${port}`;
       if (port === 9878 && url !== PUBLIC_TUNNEL_URL) {
         PUBLIC_TUNNEL_URL = url;
-        console.log(`🌍 Dominio principal (API móvil 9878): ${fullUrl}`);
+        console.log(`\n🌍 Dominio principal (API móvil 9878): ${fullUrl}\n`);
 
         // publicar Gist para discovery externo
         updateDiscoveryGist(url);
       } else {
-        console.log(`🔗 Dominio ${label}: ${fullUrl}`);
+        console.log(`🔗 Dominio ${label}: ${fullUrl}\n`);
       }
 
       // Detección del puerto del GUI (si ejecutás 'loclx gui' por separado y suelta la línea)

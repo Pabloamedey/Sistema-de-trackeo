@@ -3,7 +3,7 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as Device from "expo-device";
 import * as Location from "expo-location";
 import { useEffect, useRef, useState } from "react";
-import { Button, Platform, StyleSheet, Text, View, Alert } from "react-native";
+import { Alert, Button, Platform, StyleSheet, Text, View } from "react-native";
 import 'react-native-get-random-values';
 import MapView, { Marker, Polyline } from "react-native-maps";
 import { io } from "socket.io-client";
@@ -50,48 +50,117 @@ export default function App() {
   const [serverUrl, setServerUrl] = useState(null);
   const [statusMsg, setStatusMsg] = useState("Descubriendo servidor…");
 
+  const GIST_USER = "Pabloamedey";
+  const GIST_ID   = "123f37bd1e8b7b1612f2f567d5cf0e49";
+
+  // Proveedores de discovery (ordenado del más robusto al más frágil)
+  function buildDiscoveryProviders() {
+    const now = Date.now(); // cache-buster
+    return [
+      // 1) API oficial de GitHub (mejor contra 429 de raw)
+      {
+        name: "api.github.com",
+        url: `https://api.github.com/gists/${GIST_ID}?t=${now}`,
+        parse: async (res) => {
+          const j = await res.json();
+          const content = j?.files?.["current-tunnel.json"]?.content;
+          if (content) {
+            const obj = JSON.parse(content);
+            return obj?.server || null;
+          }
+          return null;
+        },
+        headers: {
+          "Accept": "application/vnd.github+json",
+          "User-Agent": "pepi-tracker/1.0",
+          "Cache-Control": "no-cache",
+          "Pragma": "no-cache",
+        },
+      },
+
+      // 2) CDN con cache (githack) — aguanta mejor ráfagas
+      {
+        name: "gistcdn.githack.com",
+        url: `https://gistcdn.githack.com/${GIST_USER}/${GIST_ID}/raw/current-tunnel.json?t=${now}`,
+        parse: async (res) => (await res.json())?.server || null,
+        headers: {
+          "User-Agent": "pepi-tracker/1.0",
+          "Cache-Control": "no-cache",
+          "Pragma": "no-cache",
+        },
+      },
+
+      // 3) raw.githubusercontent.com (último recurso: se rate-limita fácil)
+      {
+        name: "raw.githubusercontent.com",
+        url: `https://raw.githubusercontent.com/${GIST_USER}/${GIST_ID}/refs/heads/master/current-tunnel.json?t=${now}`,
+        parse: async (res) => (await res.json())?.server || null,
+        headers: {
+          "User-Agent": "pepi-tracker/1.0",
+          "Cache-Control": "no-cache",
+          "Pragma": "no-cache",
+        },
+      },
+    ];
+  }
   // obtiene el dominio (https://xxxxx.loclx.io) desde el Gist
   async function getDynamicServer() {
-    try {
-      const controller = new AbortController();
-      const t = setTimeout(() => controller.abort(), 6000); // 6s por si hay 4G
-      const res = await fetch(discoveryUrl, { cache: "no-store", signal: controller.signal });
-      clearTimeout(t);
+    const providers = buildDiscoveryProviders();
 
-      if (!res.ok) throw new Error(`status ${res.status}`);
-      const j = await res.json();
-      const url = j?.server;
-      if (url && /^https?:\/\/.+/i.test(url)) {
-        await AsyncStorage.setItem("serverUrl", url); // cache local
-        setStatusMsg(`Detectado: ${url}`);
-        return url;
+    for (const p of providers) {
+      try {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 12000);
+        const res = await fetch(p.url, { cache: "no-store", headers: p.headers, signal: controller.signal });
+        clearTimeout(timeout);
+
+        if (!res.ok) {
+          console.log(`Discovery ${p.name} falló: status ${res.status}`);
+          continue;
+        }
+        const server = await p.parse(res);
+        if (server && /^https?:\/\/.+/i.test(server)) {
+          console.log(`Discovery OK via ${p.name}: ${server}`);
+          return server;
+        }
+        console.log(`Discovery ${p.name} sin 'server' válido`);
+      } catch (e) {
+        console.log(`Discovery ${p.name} error: ${e.message}`);
       }
-      throw new Error("JSON sin 'server'");
-    } catch (e) {
-      setStatusMsg(`Discovery falló: ${e.message}`);
-      return null;
     }
+
+    return null;
   }
 
   // asegura tener serverUrl (1) discovery público -> (2) cache
-  async function ensureServerUrl() {
-    let url = serverUrl;
-    if (url) return url;
-
-    for (let intento = 0; intento < 3; intento++) {
-      const nuevo = await getDynamicServer();
-      if (nuevo) {
-        await AsyncStorage.setItem("serverUrl", nuevo);
-        setServerUrl(nuevo);
-        return nuevo;
+    async function ensureServerUrl() {
+    // 1) probar red primero con multi-proveedor
+    for (let i = 0; i < 3; i++) {
+      const fresh = await getDynamicServer();
+      if (fresh) {
+        const cached = await AsyncStorage.getItem("serverUrl");
+        if (cached !== fresh) {
+          console.log("🔄 Actualizando serverUrl cacheado:", cached, "=>", fresh);
+          await AsyncStorage.setItem("serverUrl", fresh);
+        }
+        setServerUrl(fresh);
+        return fresh;
       }
       console.log("Reintentando discovery en 3s...");
-      await new Promise(res => setTimeout(res, 3000));
+      await new Promise(r => setTimeout(r, 3000));
+    }
+
+    // 2) fallback a cache (último recurso)
+    const cached = await AsyncStorage.getItem("serverUrl");
+    if (cached && /^https?:\/\/.+/i.test(cached)) {
+      setServerUrl(cached);
+      return cached;
     }
 
     Alert.alert("No se pudo obtener el dominio del servidor");
     return null;
   }
+
 
   // bootstrap del serverUrl al iniciar
   useEffect(() => {
@@ -197,6 +266,7 @@ export default function App() {
   const startTracking = async () => {
     // si aún no hay serverUrl, lo buscamos ahora
     const url = await ensureServerUrl();
+    console.log("POST /location contra:", url);
     if (!url) {
       Alert.alert("Sin dominio disponible", "No se pudo conectar al servidor.");
       return;
