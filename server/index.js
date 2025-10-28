@@ -11,12 +11,16 @@ import { fileURLToPath } from "url";
 import dotenv from "dotenv";
 dotenv.config();
 
+const ADMIN_TOKEN = process.env.ADMIN_TOKEN;
+if (!ADMIN_TOKEN) {
+  console.warn("⚠️  ADMIN_TOKEN no está definido en .env. Las rutas de admin no funcionarán correctamente.");
+}
+
 // ================= rutas base =================
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 // ================= estado compartido =================
-let lastLocation = null;
 let ioHttps; // sockets sobre 9876 (https)
 let ioHttp;  // sockets sobre 9878 (http)
 let PUBLIC_TUNNEL_URL = null; // dominio público (9878) publicado en Gist
@@ -229,7 +233,6 @@ function handleLocation(req, res) {
 
   const loc = { userId: id, lat, lon, ts };
   lastByUser.set(id, loc);
-  lastLocation = loc;
 
 // solo el dueño ve su ubicación (en su app)
 ioHttp?.to(`user:${id}`).emit("selfLocation", loc);
@@ -304,6 +307,31 @@ appHttp.use((req, _res, next) => {
   next();
 });
 
+// ====== Credenciales básicas (ejemplo) ======
+const USERS = {
+  // usuario : contraseña
+  admin: "1234",
+  juan:  "secreto456",
+};
+
+// ====== Endpoint de login: devuelve el token si user/pass es válido ======
+appHttp.post("/auth/login", (req, res) => {
+  const { username, password } = req.body || {};
+  if (!username || !password)
+    return res.status(400).json({ ok: false, error: "missing_credentials" });
+
+  const ok = USERS[username] && USERS[username] === password;
+  if (!ok)
+    return res.status(401).json({ ok: false, error: "invalid_credentials" });
+
+  // Podés devolver un token distinto por usuario si querés
+  return res.json({ ok: true, token: ADMIN_TOKEN });
+});
+
+// === servir también el web-viewer por HTTP (para túnel free) ===
+appHttp.use(express.static(WEB_ROOT, { extensions: ["html"] }));
+
+
 appHttp.post("/location", handleLocation);
 appHttp.get("/health", (_req, res) => res.send("OK"));
 
@@ -315,8 +343,23 @@ appHttp.get("/server-url.json", (_req, res) => {
   res.json({ server: PUBLIC_TUNNEL_URL });
 });
 
+// ahora la raíz "/" sirve el mapa del web-viewer
 appHttp.get("/", (_req, res) => {
-  res.send(`<html><body><h2>Servidor móvil activo en puerto 9878</h2></body></html>`);
+  res.sendFile(path.join(WEB_ROOT, "index.html"));
+});
+
+// servir la interfaz de administrador por HTTP también
+appHttp.get("/admin", requireAdmin, (req, res) => {
+  res.sendFile(path.join(WEB_ROOT, "admin.html"));
+});
+
+// endpoint API del administrador (lista de dispositivos)
+appHttp.get("/admin/api/devices", requireAdmin, (_req, res) => {
+  const arr = Array.from(lastByUser.entries()).map(([userId, loc]) => ({
+    userId,
+    ...loc,
+  }));
+  res.json({ ok: true, devices: arr });
 });
 
 const httpServer = http.createServer(appHttp);
