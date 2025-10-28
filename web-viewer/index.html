@@ -2,13 +2,33 @@
 <html lang="es">
 <head>
   <meta charset="UTF-8" />
-  <title>Seguimiento en tiempo real</title>
+  <title>Seguimiento en tiempo real + Panel</title>
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
   <style>
     html, body { height: 100%; margin: 0; }
-    #map { width: 100%; height: 100vh; }
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; }
+    .center {
+      height: 100vh; display: grid; place-items: center; background:#0b1220; color:#e6eef8;
+    }
+    .layout { display: grid; grid-template-columns: 1fr 340px; height: 100vh; }
+    #map { width: 100%; height: 100%; }
+    /* Panel estilo admin */
+    .panel { background:#0b1220; color:#e6eef8; border-left:1px solid #1e2a3f; overflow:auto; }
+    .panel header { padding:12px 14px; border-bottom:1px solid #1e2a3f; }
+    .panel h1 { margin:0; font-size:16px; color:#7ee7a6 }
+    .small { color:#9fb3c8; font-size:13px }
+    .device { background:#182233; padding:10px; margin:8px 12px; border-radius:8px; }
+    .legend {
+      position: absolute; top: 12px; right: 360px;
+      background: rgba(255,255,255,0.95);
+      border: 1px solid #ddd; border-radius: 10px; padding: 10px 12px;
+      box-shadow: 0 4px 14px rgba(0,0,0,0.08); max-width: 240px;
+    }
+    .legend h4 { margin: 0 0 8px; font-size: 14px; }
+    .legend .row { display:flex; align-items:center; gap:8px; margin:4px 0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+    .legend .dot { width: 12px; height: 12px; border-radius: 50%; flex: 0 0 12px; border: 1px solid #999; }
     .user-label {
       background: rgba(255,255,255,0.9);
       padding: 2px 6px;
@@ -17,139 +37,213 @@
       font-size: 12px;
       font-weight: 600;
     }
-    .legend {
-      position: absolute;
-      top: 12px;
-      right: 12px;
-      background: rgba(255,255,255,0.95);
-      border: 1px solid #ddd;
-      border-radius: 10px;
-      padding: 10px 12px;
-      box-shadow: 0 4px 14px rgba(0,0,0,0.08);
-      font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
-      max-width: 240px;
-    }
-    .legend h4 { margin: 0 0 8px; font-size: 14px; }
-    .legend .row {
-      display: flex; align-items: center; gap: 8px; margin: 4px 0;
-      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-    }
-    .legend .dot {
-      width: 12px; height: 12px; border-radius: 50%;
-      flex: 0 0 12px; border: 1px solid #999;
-    }
+    .actions { display:flex; gap:8px; padding:10px 14px; border-bottom:1px solid #1e2a3f; }
+    .actions button { background:#7ee7a6; color:#071025; border:none; padding:8px 12px; border-radius:6px; cursor:pointer; }
   </style>
 </head>
 <body>
-  <div id="map"></div>
-  <div class="legend" id="legend">
-    <h4>Dispositivos</h4>
-    <div id="legendRows"></div>
+  <!-- Vista “previa” (gate). Si el token falla, solo se ve esto. -->
+  <div id="gate" class="center">
+    <div style="text-align:center">
+      <h2 style="margin:0 0 8px">Acceso restringido</h2>
+      <p class="small" style="margin:0 0 16px">Se requiere ADMIN_TOKEN para ingresar</p>
+      <button id="btnEnter" style="background:#7ee7a6;color:#071025;border:none;padding:10px 14px;border-radius:8px;cursor:pointer">
+        Ingresar token
+      </button>
+      <div id="gateMsg" class="small" style="margin-top:12px;color:#e6a6a6"></div>
+    </div>
+  </div>
+
+  <!-- Visor (mapa + menú). Se muestra recién cuando el token es válido -->
+  <div id="app" class="layout" style="display:none">
+    <div style="position:relative">
+      <div id="map"></div>
+      <div class="legend" id="legend">
+        <h4>Dispositivos</h4>
+        <div id="legendRows"></div>
+      </div>
+    </div>
+    <aside class="panel">
+      <header>
+        <h1>Panel de Dispositivos</h1>
+        <div class="small">Solo accesible con token de admin</div>
+      </header>
+      <div class="actions">
+        <button id="btnLogin">Entrar con usuario/contraseña</button>
+        <button id="btnRefetch">Actualizar</button>
+      </div>
+      <div id="status" class="small" style="padding:8px 14px">Cargando…</div>
+      <div id="list"></div>
+    </aside>
   </div>
 
   <script>
-    // ====== Mapa base ======
-    const map = L.map("map").setView([0, 0], 2);
-    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
-      maxZoom: 19,
-      attribution: '&copy; OpenStreetMap'
-    }).addTo(map);
+    // ====== Gate de acceso (no se inicia el visor hasta validar) ======
+    const gateEl = document.getElementById('gate');
+    const appEl = document.getElementById('app');
+    const gateMsg = document.getElementById('gateMsg');
+    const btnEnter = document.getElementById('btnEnter');
 
-    // Centrar en la ubicación del navegador (opcional)
-    if (navigator.geolocation) {
-      navigator.geolocation.getCurrentPosition(
-        (pos) => map.setView([pos.coords.latitude, pos.coords.longitude], 14),
-        () => {}, { enableHighAccuracy: true, timeout: 5000 }
-      );
+    let token = null;
+
+    async function pedirToken() {
+      const t = prompt("ADMIN_TOKEN (obligatorio):");
+      return (t && t.trim()) ? t.trim() : null;
     }
 
-    // ====== Utilidades ======
-    function hashCode(str) {
-      let h = 0; for (let i = 0; i < str.length; i++) { h = (h << 5) - h + str.charCodeAt(i); h |= 0; }
-      return Math.abs(h);
-    }
-    const palette = [
-      "#e61e50","#f39c12","#27ae60","#2980b9","#8e44ad",
-      "#16a085","#d35400","#2c3e50","#c0392b","#7f8c8d",
-      "#9b59b6","#1abc9c","#34495e","#f1c40f","#e67e22"
-    ];
-    const colorOf = (id) => palette[ hashCode(id) % palette.length ];
-
-    // Estado por usuario: { marker, poly, latlngs[], color }
-    const tracks = new Map();
-    const MAX_POINTS = 500;
-    let firstFitDone = false;
-
-    // Leyenda
-    const legendRows = document.getElementById("legendRows");
-    function ensureLegendRow(id, color) {
-      const rowId = `legend-${id}`;
-      if (document.getElementById(rowId)) return;
-      const row = document.createElement("div");
-      row.className = "row";
-      row.id = rowId;
-      row.innerHTML = `<div class="dot" style="background:${color}"></div><div title="${id}">${id}</div>`;
-      legendRows.appendChild(row);
+    async function loginUsuario() {
+      const user = prompt("Usuario:");
+      if (!user) return null;
+      const pass = prompt("Contraseña:");
+      if (!pass) return null;
+      try {
+        const r = await fetch("/auth/login", {
+          method: "POST",
+          headers: { "Content-Type":"application/json" },
+          body: JSON.stringify({ username: user, password: pass })
+        });
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        const j = await r.json();
+        if (j?.ok && j?.token) return j.token;
+      } catch(e) {}
+      return null;
     }
 
-    // ====== Socket.IO (mismo origen) ======
-    const socket = io(); // se conecta al servidor que sirve este HTML
+    async function validarToken(t) {
+      try {
+        const res = await fetch('/admin/api/devices', { headers: { 'x-admin-token': t } });
+        return res.ok;
+      } catch {
+        return false;
+      }
+    }
 
-    // === NUEVO: autenticación y unión al room de admins ===
-    const token =
-      new URLSearchParams(location.search).get("token") ||
-      localStorage.getItem("admin_token") ||
-      prompt("ADMIN_TOKEN:");
-    if (token) localStorage.setItem("admin_token", token);
+    async function gateFlow() {
+      gateMsg.textContent = '';
+      const t = await pedirToken();
+      if (!t) { gateMsg.textContent = 'TOKEN INVÁLIDO'; return; }
+      const ok = await validarToken(t);
+      if (!ok) { gateMsg.textContent = 'TOKEN INVÁLIDO'; return; }
+      token = t;
+      // Mostrar visor
+      gateEl.style.display = 'none';
+      appEl.style.display = 'grid';
+      // Iniciar visor ya validado
+      initVisor();
+    }
 
-    socket.on("connect", () => {
-      console.log("🔌 Socket conectado como admin");
-      socket.emit("hello", { role: "admin", token });
-    });
+    btnEnter.onclick = gateFlow;
 
-    // Recibir ubicación en vivo de los dispositivos
-    socket.on("locationUpdate", (payload) => {
-      // payload esperado: { userId, lat, lon, ts }
-      const id = payload.userId || "anon";
-      const lat = Number(payload.lat), lon = Number(payload.lon);
-      if (!Number.isFinite(lat) || !Number.isFinite(lon)) return;
+    // ====== A partir de acá se inicializa el visor (mapa + panel) SOLO si token es válido ======
+    function initVisor() {
+      const map = L.map("map").setView([0, 0], 2);
+      L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+        maxZoom: 19, attribution: '&copy; OpenStreetMap'
+      }).addTo(map);
 
-      const color = tracks.get(id)?.color || colorOf(id);
-
-      // crear track si no existe
-      if (!tracks.has(id)) {
-        const marker = L.circleMarker([lat, lon], {
-          radius: 8, color, fillColor: color, fillOpacity: 0.9, weight: 2
-        }).addTo(map)
-          .bindTooltip(id, { permanent: true, direction: "top", className: "user-label" });
-
-        const poly = L.polyline([[lat, lon]], { color, weight: 4, opacity: 0.85 }).addTo(map);
-
-        tracks.set(id, { marker, poly, latlngs: [[lat, lon]], color });
-        ensureLegendRow(id, color);
-
-        // primer encuadre: que se vean todos los marcadores
-        if (!firstFitDone) {
-          const group = L.featureGroup([...tracks.values()].map(t => t.marker));
-          map.fitBounds(group.getBounds().pad(0.2), { maxZoom: 16 });
-          firstFitDone = true;
-        }
-      } else {
-        // actualizar existentes
-        const t = tracks.get(id);
-        t.marker.setLatLng([lat, lon]);
-        t.latlngs.push([lat, lon]);
-        if (t.latlngs.length > MAX_POINTS) t.latlngs.shift();
-        t.poly.setLatLngs(t.latlngs);
+      if (navigator.geolocation) {
+        navigator.geolocation.getCurrentPosition(
+          (pos) => map.setView([pos.coords.latitude, pos.coords.longitude], 14),
+          () => {}, { enableHighAccuracy: true, timeout: 5000 }
+        );
       }
 
-      // (opcional) auto-pan suave hacia el último que se mueve
-      // map.panTo([lat, lon], { animate: true, duration: 0.5 });
-    });
+      function hashCode(str) { let h = 0; for (let i = 0; i < str.length; i++) { h = (h << 5) - h + str.charCodeAt(i); h |= 0; } return Math.abs(h); }
+      const palette = ["#e61e50","#f39c12","#27ae60","#2980b9","#8e44ad","#16a085","#d35400","#2c3e50","#7f8c8d","#9b59b6","#1abc9c","#34495e","#f1c40f","#e67e22"];
+      const colorOf = (id) => palette[ hashCode(id) % palette.length ];
 
-    socket.on("disconnect", () => {
-      console.log("❌ Socket desconectado");
-    });
+      const tracks = new Map();
+      const MAX_POINTS = 500;
+      let firstFitDone = false;
+
+      const legendRows = document.getElementById("legendRows");
+      function ensureLegendRow(id, color) {
+        const rowId = `legend-${id}`;
+        if (document.getElementById(rowId)) return;
+        const row = document.createElement("div");
+        row.className = "row";
+        row.id = rowId;
+        row.innerHTML = `<div class="dot" style="background:${color}"></div><div title="${id}">${id}</div>`;
+        legendRows.appendChild(row);
+      }
+
+      const statusEl = document.getElementById('status');
+      const listEl = document.getElementById('list');
+      const btnLogin = document.getElementById('btnLogin');
+      const btnRefetch = document.getElementById('btnRefetch');
+
+      const socket = io();
+
+      // Conectar como admin (ya validado)
+      socket.on("connect", () => {
+        socket.emit("hello", { role: "admin", token });
+      });
+
+      // Mapa en vivo
+      socket.on("locationUpdate", ({ userId, lat, lon, ts }) => {
+        const id = userId || "anon";
+        const la = Number(lat), lo = Number(lon);
+        if (!Number.isFinite(la) || !Number.isFinite(lo)) return;
+
+        const color = tracks.get(id)?.color || colorOf(id);
+
+        if (!tracks.has(id)) {
+          const marker = L.circleMarker([la, lo], { radius: 8, color, fillColor: color, fillOpacity: 0.9, weight: 2 }).addTo(map)
+            .bindTooltip(id, { permanent: true, direction: "top", className: "user-label" });
+          const poly = L.polyline([[la, lo]], { color, weight: 4, opacity: 0.85 }).addTo(map);
+          tracks.set(id, { marker, poly, latlngs: [[la, lo]], color });
+          ensureLegendRow(id, color);
+
+          if (!firstFitDone) {
+            const group = L.featureGroup([...tracks.values()].map(t => t.marker));
+            map.fitBounds(group.getBounds().pad(0.2), { maxZoom: 16 });
+            firstFitDone = true;
+          }
+        } else {
+          const t = tracks.get(id);
+          t.marker.setLatLng([la, lo]);
+          t.latlngs.push([la, lo]);
+          if (t.latlngs.length > MAX_POINTS) t.latlngs.shift();
+          t.poly.setLatLngs(t.latlngs);
+        }
+      });
+
+      async function fetchDevices() {
+        try {
+          const res = await fetch('/admin/api/devices', { headers: { 'x-admin-token': token } });
+          if (!res.ok) { statusEl.textContent = '❌ ' + res.status; listEl.innerHTML = ''; return; }
+          const j = await res.json();
+          listEl.innerHTML = (j.devices || []).map(d => `
+            <div class="device">
+              <strong>${d.userId}</strong>
+              <span class="small"> (${new Date(d.ts).toLocaleString()})</span><br/>
+              Lat: ${d.lat} — Lon: ${d.lon}
+            </div>
+          `).join('') || '<div class="small" style="padding:12px 14px">No hay dispositivos conectados</div>';
+          statusEl.textContent = '✅ Conectados: ' + (j.devices?.length || 0);
+        } catch {
+          statusEl.textContent = '⚠️ Error de red';
+          listEl.innerHTML = '';
+        }
+      }
+
+      // Polling del panel
+      fetchDevices();
+      const poll = setInterval(fetchDevices, 2000);
+
+      // Botones del panel
+      btnLogin.onclick = async () => {
+        const t = await loginUsuario();
+        if (t) {
+          token = t;
+          socket.emit("hello", { role: "admin", token });
+          fetchDevices();
+        }
+      };
+      btnRefetch.onclick = () => fetchDevices();
+
+      window.addEventListener("beforeunload", () => clearInterval(poll));
+    }
   </script>
 </body>
 </html>
