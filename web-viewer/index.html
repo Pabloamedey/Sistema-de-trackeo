@@ -95,6 +95,19 @@
     // ====== Socket.IO (mismo origen) ======
     const socket = io(); // se conecta al servidor que sirve este HTML
 
+    // === NUEVO: autenticación y unión al room de admins ===
+    const token =
+      new URLSearchParams(location.search).get("token") ||
+      localStorage.getItem("admin_token") ||
+      prompt("ADMIN_TOKEN:");
+    if (token) localStorage.setItem("admin_token", token);
+
+    socket.on("connect", () => {
+      console.log("🔌 Socket conectado como admin");
+      socket.emit("hello", { role: "admin", token });
+    });
+
+    // Recibir ubicación en vivo de los dispositivos
     socket.on("locationUpdate", (payload) => {
       // payload esperado: { userId, lat, lon, ts }
       const id = payload.userId || "anon";
@@ -132,6 +145,10 @@
 
       // (opcional) auto-pan suave hacia el último que se mueve
       // map.panTo([lat, lon], { animate: true, duration: 0.5 });
+    });
+
+    socket.on("disconnect", () => {
+      console.log("❌ Socket desconectado");
     });
   </script>
 </body>
