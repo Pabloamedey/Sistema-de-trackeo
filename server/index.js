@@ -176,6 +176,14 @@ app.use(express.json());
 const WEB_ROOT = path.resolve(__dirname, "..", "web-viewer");
 app.use(express.static(WEB_ROOT, { extensions: ["html"] }));
 
+const viewerDir = path.resolve(__dirname, "../web-viewer");
+app.use(express.static(viewerDir));
+
+app.get("/", (req, res) => {
+  res.sendFile(path.join(viewerDir, "index.html"));
+});
+
+
 app.get("/health", (_req, res) => res.send("OK"));
 
 // handler común /location
@@ -282,8 +290,9 @@ app.get("/admin/api/devices", requireAdmin, (_req, res) => {
 });
 // =============================================
 
-httpsServer.listen(9876, () => {
-  console.log(`🔒 HTTPS on https://${IP}:9876`);
+// HTTPS (visor/admin)
+httpsServer.listen(9876, '0.0.0.0', () => {
+  console.log(`HTTPS on https://${IP}:9876`);
 });
 
 // ================== EXPRESS: HTTP (API móvil) ==================
