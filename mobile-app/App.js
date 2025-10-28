@@ -9,8 +9,6 @@ import MapView, { Marker, Polyline } from "react-native-maps";
 import { io } from "socket.io-client";
 import { v4 as uuidv4 } from "uuid";
 
-const discoveryUrl = "https://gist.githubusercontent.com/Pabloamedey/123f37bd1e8b7b1612f2f567d5cf0e49/raw/current-tunnel.json";
-
 // Comprobar si el dispositivo se mueve o no
 const minMoveMeters = 7;     // umbral de movimiento
 const masStaleSeconds = 30;  // manda un heartbeat como máximo cada 30s
@@ -241,26 +239,44 @@ export default function App() {
     })();
   }, []);
 
-  // Socket para ver al “seguido” en tiempo real
-  useEffect(() => {
-    if (!serverUrl) return;
-    setStatusMsg(`🧩 Conectando a ${serverUrl}…`);
-    try {
-      socketRef.current = io(serverUrl, { transports: ["websocket", "polling"] }); // transports
-    } catch (e) {
-      setStatusMsg(`Error creando socket: ${e.message}`);
-      return;
-    }
-    socketRef.current.on("connect", () => setStatusMsg(`✅ Conectado a ${serverUrl}`));
-    socketRef.current.on("connect_error", (err) => setStatusMsg(`Socket error: ${err?.message || err}`));
-    socketRef.current.on("locationUpdate", ({ lat, lon }) => {
-      const p = { latitude: lat, longitude: lon };
-      setTargetCoord(p);
-      setPath((prev) => [...prev, p]);
-      mapRef.current?.animateToRegion({ ...p, latitudeDelta: 0.01, longitudeDelta: 0.01 }, 600);
-    });
-    return () => socketRef.current?.disconnect();
-  }, [serverUrl]);
+    // Socket para ver al “seguido” en tiempo real
+    useEffect(() => {
+        if (!serverUrl || !userId) return;
+        setStatusMsg(`🧩 Conectando a ${serverUrl}…`);
+        try {
+        socketRef.current = io(serverUrl, { transports: ["websocket", "polling"] });
+        } catch (e) {
+        setStatusMsg(`Error creando socket: ${e.message}`);
+        return;
+        }
+
+        // Cuando se conecta el socket
+        socketRef.current.on("connect", () => {
+        setStatusMsg(`✅ Conectado a ${serverUrl}`);
+        // Unirse al room correspondiente a este usuario
+        socketRef.current.emit("hello", { userId });
+        });
+
+        // Si ocurre un error de conexión
+        socketRef.current.on("connect_error", (err) => {
+        setStatusMsg(`Socket error: ${err?.message || err}`);
+        });
+
+        // Recibir actualizaciones de ubicación del propio usuario
+        // (el server emite 'selfLocation' al room user:<id>)
+        socketRef.current.on("selfLocation", ({ lat, lon }) => {
+        const p = { latitude: lat, longitude: lon };
+        setTargetCoord(p);
+        setPath((prev) => [...prev, p]);
+        mapRef.current?.animateToRegion(
+            { ...p, latitudeDelta: 0.01, longitudeDelta: 0.01 },
+            600
+        );
+        });
+
+        // Limpieza al desmontar o cambiar serverUrl/userId
+        return () => socketRef.current?.disconnect();
+    }, [serverUrl, userId]);
 
   // Enviar mi ubicación con el ID persistente
   const startTracking = async () => {

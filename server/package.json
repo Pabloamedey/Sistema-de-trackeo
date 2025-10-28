@@ -8,6 +8,7 @@
   },
   "dependencies": {
     "cors": "^2.8.5",
+    "dotenv": "^17.2.3",
     "express": "^4.19.2",
     "qrcode-terminal": "^0.12.0",
     "selfsigned": "^3.0.1",

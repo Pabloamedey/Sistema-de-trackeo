@@ -1,0 +1,66 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Admin - Tracker</title>
+  <style>
+    body { font-family: Arial, sans-serif; background:#0b1220; color:#e6eef8; padding:18px; }
+    h1 { color:#7ee7a6 }
+    .device { background:#182233; padding:10px; margin:8px 0; border-radius:8px; }
+    .small { color:#9fb3c8; font-size:13px }
+    #tokenInput { width:320px; padding:6px; margin-right:8px; }
+    button { background:#7ee7a6; color:#071025; border:none; padding:8px 12px; border-radius:6px; cursor:pointer; }
+  </style>
+</head>
+<body>
+  <h1>Panel de Dispositivos</h1>
+  <p class="small">Solo accesible con token de admin.</p>
+  <div>
+    <input id="tokenInput" placeholder="ADMIN_TOKEN"/>
+    <button id="save">Guardar token</button>
+  </div>
+  <div id="status" class="small">Esperando...</div>
+  <div id="list"></div>
+
+  <script>
+    const statusEl = document.getElementById('status');
+    const listEl = document.getElementById('list');
+    const tokenInput = document.getElementById('tokenInput');
+    const saveBtn = document.getElementById('save');
+
+    let token = localStorage.getItem('admin_token') || '';
+    if (token) tokenInput.value = token;
+    saveBtn.onclick = () => {
+      token = tokenInput.value.trim();
+      localStorage.setItem('admin_token', token);
+      statusEl.textContent = 'Token guardado';
+    };
+
+    async function fetchDevices() {
+      if (!token) { statusEl.textContent = '⚠️ Ingresá el ADMIN_TOKEN'; return; }
+      try {
+        const res = await fetch('/admin/api/devices', { headers: { 'x-admin-token': token }});
+        if (!res.ok) { statusEl.textContent = '❌ ' + res.status; listEl.innerHTML = ''; return; }
+        const j = await res.json();
+        renderList(j.devices);
+        statusEl.textContent = '✅ Conectados: ' + j.devices.length;
+      } catch (e) {
+        statusEl.textContent = '⚠️ Error de red';
+      }
+    }
+
+    function renderList(devs) {
+      listEl.innerHTML = devs.map(d => `
+        <div class="device">
+          <strong>${d.userId}</strong>
+          <span class="small"> (${new Date(d.ts).toLocaleString()})</span><br/>
+          Lat: ${d.lat} — Lon: ${d.lon}
+        </div>
+      `).join('') || '<div class="small">No hay dispositivos conectados</div>';
+    }
+
+    setInterval(fetchDevices, 2000);
+    fetchDevices();
+  </script>
+</body>
+</html>

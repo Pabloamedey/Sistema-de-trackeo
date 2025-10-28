@@ -8,6 +8,8 @@ import cors from "cors";
 import { Server as IOServer } from "socket.io";
 import { spawn } from "child_process";
 import { fileURLToPath } from "url";
+import dotenv from "dotenv";
+dotenv.config();
 
 // ================= rutas base =================
 const __filename = fileURLToPath(import.meta.url);
@@ -48,8 +50,6 @@ const credentials = {
   key: fs.readFileSync(path.resolve(__dirname, `./certs/${IP}-key.pem`)),
   cert: fs.readFileSync(path.resolve(__dirname, `./certs/${IP}.pem`)),
 };
-// =============================================================
-
 
 // ================== publicar dominio en Gist (opcional) ==================
 function updateDiscoveryGist(url) {
@@ -167,12 +167,14 @@ function startLocalXposeAndCaptureUrl() {
 // === Iniciar LocalXpose automáticamente ===
 startLocalXposeAndCaptureUrl();
 
-
 // ================== EXPRESS: HTTPS (visor) ==================
 const app = express();
 app.use(cors());
 app.use(express.json());
-app.use(express.static(path.resolve(__dirname, "../web-viewer")));
+
+// servir web-viewer que está fuera de /server
+const WEB_ROOT = path.resolve(__dirname, "..", "web-viewer");
+app.use(express.static(WEB_ROOT, { extensions: ["html"] }));
 
 app.get("/health", (_req, res) => res.send("OK"));
 
@@ -190,6 +192,18 @@ function handleLocation(req, res) {
 
   const id = String(userId ?? "anon");
   const prev = lastByUser.get(id);
+
+  if (!prev) {
+    // Primera ubicación de este usuario: aceptar siempre
+    lastByUser.set(id, { lat, lon, ts });
+    console.log(`📍 Primera ubicación de ${id}: ${lat.toFixed(6)}, ${lon.toFixed(6)} [${new Date(ts).toLocaleTimeString()}]`);
+    const loc = { userId: id, lat, lon, ts };
+    ioHttp?.to(`user:${id}`).emit("selfLocation", loc);
+    ioHttps?.to(`user:${id}`).emit("selfLocation", loc);
+    ioHttp?.to("admins").emit("locationUpdate", loc);
+    ioHttps?.to("admins").emit("locationUpdate", loc);
+    return res.send({ ok: true, first: true });
+  }
 
   if (prev) {
     const dt = (ts - prev.ts) / 1000;
@@ -209,8 +223,13 @@ function handleLocation(req, res) {
   lastByUser.set(id, loc);
   lastLocation = loc;
 
-  ioHttps?.emit("locationUpdate", loc);
-  ioHttp?.emit("locationUpdate", loc);
+// solo el dueño ve su ubicación (en su app)
+ioHttp?.to(`user:${id}`).emit("selfLocation", loc);
+ioHttps?.to(`user:${id}`).emit("selfLocation", loc);
+
+// los admins ven todo
+ioHttp?.to("admins").emit("locationUpdate", loc);
+ioHttps?.to("admins").emit("locationUpdate", loc);
 
   console.log(`📥 ${id} -> ${lat.toFixed(6)}, ${lon.toFixed(6)} [${new Date(ts).toLocaleTimeString()}]`);
   res.send({ ok: true });
@@ -219,17 +238,53 @@ function handleLocation(req, res) {
 const httpsServer = https.createServer(credentials, app);
 ioHttps = new IOServer(httpsServer, { cors: { origin: "*" } });
 
+// HTTPS (visor/admin)
 ioHttps.on("connection", (socket) => {
-  console.log("Dispositivo conectado (HTTPS):", socket.id);
-  if (lastLocation) socket.emit("locationUpdate", lastLocation);
+  console.log("Socket HTTPS conectado:", socket.id);
+
+  socket.on("hello", ({ role, userId, token } = {}) => {
+    if (role === "admin") {
+      const ok = process.env.ADMIN_TOKEN && token === process.env.ADMIN_TOKEN;
+      if (ok) {
+        socket.join("admins");
+        const arr = Array.from(lastByUser.entries()).map(([uid, loc]) => ({ userId: uid, ...loc }));
+        socket.emit("adminSnapshot", { devices: arr });
+      } else {
+        socket.disconnect(true);
+      }
+      return;
+    }
+    const id = String(userId || "anon");
+    socket.join(`user:${id}`);
+  });
 });
 
 app.post("/location", handleLocation);
 
+// auth por token para admin
+function requireAdmin(req, res, next) {
+  const expected = process.env.ADMIN_TOKEN;
+  const header = req.headers["x-admin-token"];
+  const q = req.query?.token; // solo para pruebas
+  if (expected && (header === expected || q === expected)) return next();
+  res.status(401).send("Unauthorized");
+}
+
+// UI admin (sirve web-viewer/admin.html)
+app.get("/admin", requireAdmin, (req, res) => {
+  res.sendFile(path.join(WEB_ROOT, "admin.html"));
+});
+
+// API admin: lista de dispositivos conectados
+app.get("/admin/api/devices", requireAdmin, (_req, res) => {
+  const arr = Array.from(lastByUser.entries()).map(([userId, loc]) => ({ userId, ...loc }));
+  res.json({ ok: true, devices: arr });
+});
+// =============================================
+
 httpsServer.listen(9876, () => {
   console.log(`🔒 HTTPS on https://${IP}:9876`);
 });
-
 
 // ================== EXPRESS: HTTP (API móvil) ==================
 const appHttp = express();
@@ -258,9 +313,25 @@ appHttp.get("/", (_req, res) => {
 const httpServer = http.createServer(appHttp);
 ioHttp = new IOServer(httpServer, { cors: { origin: "*" } });
 
+// HTTP (API móvil)
 ioHttp.on("connection", (socket) => {
-  console.log("Dispositivo conectado (HTTP 9878):", socket.id);
-  if (lastLocation) socket.emit("locationUpdate", lastLocation);
+  console.log("Socket HTTP 9878 conectado:", socket.id);
+
+  socket.on("hello", ({ role, userId, token } = {}) => {
+    if (role === "admin") {
+      const ok = process.env.ADMIN_TOKEN && token === process.env.ADMIN_TOKEN;
+      if (ok) {
+        socket.join("admins");
+        const arr = Array.from(lastByUser.entries()).map(([uid, loc]) => ({ userId: uid, ...loc }));
+        socket.emit("adminSnapshot", { devices: arr });
+      } else {
+        socket.disconnect(true);
+      }
+      return;
+    }
+    const id = String(userId || "anon");
+    socket.join(`user:${id}`);
+  });
 });
 
 httpServer.listen(9878, "0.0.0.0", () => {
