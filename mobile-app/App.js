@@ -3,11 +3,13 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as Device from "expo-device";
 import * as Location from "expo-location";
 import { useEffect, useRef, useState } from "react";
-import { Alert, Button, Platform, StyleSheet, Text, View } from "react-native";
+import { Alert, Button, Platform, StyleSheet, Text, View, Linking } from "react-native";
+import * as Clipboard from "expo-clipboard";
 import 'react-native-get-random-values';
 import MapView, { Marker, Polyline } from "react-native-maps";
 import { io } from "socket.io-client";
 import { v4 as uuidv4 } from "uuid";
+
 
 // Comprobar si el dispositivo se mueve o no
 const minMoveMeters = 7;     // umbral de movimiento
@@ -158,6 +160,47 @@ export default function App() {
     Alert.alert("No se pudo obtener el dominio del servidor");
     return null;
   }
+
+    // Helpers para abrir/copiar visor/admin ===
+  const normalizeBase = (u) => (u ? u.replace(/\/+$/, "") : null);
+
+  const buildViewerUrl = (base) => `${normalizeBase(base)}/`;
+  const ADMIN_TOKEN = "supersecreto"; // o process.env.ADMIN_TOKEN si querés importarlo
+  const buildAdminUrl = (base, token) =>
+    `${normalizeBase(base)}/admin?token=${encodeURIComponent(token)}`;
+
+  // Acciones de visor/admin ===
+  const openViewerInBrowser = async () => {
+    const base = await ensureServerUrl();
+    if (!base) return Alert.alert("Sin dominio público", "No se pudo resolver la URL del servidor.");
+    const url = buildViewerUrl(base);
+    Linking.openURL(url);
+  };
+
+  const copyViewerUrl = async () => {
+    const base = await ensureServerUrl();
+    if (!base) return Alert.alert("Sin dominio público", "No se pudo resolver la URL del servidor.");
+    const url = buildViewerUrl(base);
+    await Clipboard.setStringAsync(url);
+    Alert.alert("URL copiada", url);
+  };
+
+  const openAdminInBrowser = async () => {
+    const base = await ensureServerUrl();
+    if (!base) return Alert.alert("Sin dominio público", "No se pudo resolver la URL del servidor.");
+    if (!ADMIN_TOKEN) return Alert.alert("Falta token", "Configura ADMIN_TOKEN en la app.");
+    const url = buildAdminUrl(base, ADMIN_TOKEN);
+    Linking.openURL(url);
+  };
+
+  const copyAdminUrl = async () => {
+    const base = await ensureServerUrl();
+    if (!base) return Alert.alert("Sin dominio público", "No se pudo resolver la URL del servidor.");
+    if (!ADMIN_TOKEN) return Alert.alert("Falta token", "Configura ADMIN_TOKEN en la app.");
+    const url = buildAdminUrl(base, ADMIN_TOKEN);
+    await Clipboard.setStringAsync(url);
+    Alert.alert("URL copiada", url);
+  };
 
 
   // bootstrap del serverUrl al iniciar
@@ -426,6 +469,12 @@ export default function App() {
             ? `${myCoord.latitude.toFixed(5)}, ${myCoord.longitude.toFixed(5)}`
             : "—"}
         </Text>
+        <View style={{ marginTop: 8, gap: 8 }}>
+          <Button title="Abrir visor web" onPress={openViewerInBrowser} />
+          <Button title="Copiar URL del visor" onPress={copyViewerUrl} />
+          <Button title="Abrir admin web (con token)" onPress={openAdminInBrowser} />
+          <Button title="Copiar URL del admin (con token)" onPress={copyAdminUrl} />
+        </View>
       </View>
     </View>
   );
