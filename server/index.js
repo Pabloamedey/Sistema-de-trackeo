@@ -225,7 +225,7 @@ function handleLocation(req, res) {
     if (heartbeat) {
       const when = new Date(ts).toLocaleTimeString();
       console.log(
-        `💓 heartbeat de ${id}: ${lat.toFixed(6)}, ${lon.toFixed(6)} [${when}]`
+        `Posición de ${id}: ${lat.toFixed(6)}, ${lon.toFixed(6)} [${when}]`
       );
 
       lastByUser.set(id, { lat, lon, ts });
