@@ -1,14 +1,15 @@
 // index.js — server + tunnels + gist (CERTS MANUALES)
-import fs from "fs";
-import path from "path";
-import http from "http";
-import https from "https";
-import express from "express";
-import cors from "cors";
+import { fileURLToPath } from "url";
 import { Server as IOServer } from "socket.io";
 import { spawn } from "child_process";
-import { fileURLToPath } from "url";
+import cors from "cors";
 import dotenv from "dotenv";
+import express from "express";
+import fs from "fs";
+import http from "http";
+import https from "https";
+import path from "path";
+
 dotenv.config();
 
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN;
@@ -106,56 +107,56 @@ function updateDiscoveryGist(url) {
 // ================== LocalXpose: lanzar túneles y capturar URLs ==================
 function startLocalXposeAndCaptureUrl() {
   const BIN = process.platform === "win32" ? "loclx.exe" : "loclx";
+
+  // los que queremos levantar siempre
   const ports = [
     { port: 9876, label: "https-visor" },
     { port: 9878, label: "api-movil" },
     { port: 8081, label: "expo" },
   ];
 
-  const attachParsers = (child, label, port) => {
-    const parse = (chunk) => {
+  const spawnTunnel = ({ port, label }) => {
+    const args = ["tunnel", "http", "--to", `localhost:${port}`];
+    const child = spawn(BIN, args, { shell: true });
+
+    // log
+    console.log(`[loclx:${label}] lanzado → localhost:${port}`);
+
+    // parser de salida
+    const attachParsers = (chunk) => {
       const s = chunk.toString();
       process.stdout.write(`[loclx:${label}] ${s}`);
 
-      // Dominio público detectado en salida
+      // buscar subdominio
       const m = s.match(/(?:https?:\/\/)?([a-z0-9][a-z0-9-]*\.loclx\.io)/i);
       if (!m) return;
 
-      // Si no trae protocolo, asumimos http:// (LocalXpose suele decir "(http, us)")
       const url = m[1].startsWith("http") ? m[1] : `http://${m[1]}`;
-
-      // Log lindo con mapping a puerto local
       const fullUrl = `${url} → localhost:${port}`;
+
       if (port === 9878 && url !== PUBLIC_TUNNEL_URL) {
         PUBLIC_TUNNEL_URL = url;
         console.log(`\n🌍 Dominio principal (API móvil 9878): ${fullUrl}\n`);
-
-        // publicar Gist para discovery externo
         updateDiscoveryGist(url);
       } else {
         console.log(`🔗 Dominio ${label}: ${fullUrl}\n`);
       }
-
-      // Detección del puerto del GUI (si ejecutás 'loclx gui' por separado y suelta la línea)
-      const guiMatch = s.match(/http:\/\/localhost:(\d+)/);
-      if (guiMatch) {
-        console.log(`📟 LocalXpose GUI: http://localhost:${guiMatch[1]}`);
-      }
     };
 
-    child.stdout.on("data", parse);
-    child.stderr.on("data", parse);
+    child.stdout.on("data", attachParsers);
+    child.stderr.on("data", attachParsers);
+
+    // si el túnel se cierra (cuenta free, timeout, etc.)
+    child.on("close", (code) => {
+      console.log(`[loclx:${label}] cerrado con código ${code} — reintentando en 5s...`);
+      setTimeout(() => spawnTunnel({ port, label }), 5000);
+    });
   };
 
-  // lanzar túnel por puerto
-  ports.forEach(({ port, label }) => {
-    const args = ["tunnel", "http", "--to", `localhost:${port}`];
-    const child = spawn(BIN, args, { shell: true });
-    attachParsers(child, label, port);
-    child.on("close", (code) => console.log(`[loclx:${label}] cerrado con código`, code));
-  });
+  // lanzar todos
+  ports.forEach(spawnTunnel);
 
-  // (opcional) lanzar GUI — si lo usás, queda acá
+  // (opcional) GUI
   try {
     const gui = spawn(BIN, ["gui"], { shell: true });
     gui.stdout.on("data", (buf) => {
@@ -192,7 +193,7 @@ app.get("/health", (_req, res) => res.send("OK"));
 
 // handler común /location
 function handleLocation(req, res) {
-  let { userId, lat, lon, ts } = req.body || {};
+  let { userId, lat, lon, ts, heartbeat } = req.body || {};
   lat = Number(lat);
   lon = Number(lon);
   ts = Number(ts) || Date.now();
@@ -221,7 +222,25 @@ function handleLocation(req, res) {
     const dt = (ts - prev.ts) / 1000;
     const d = distanceMeters(prev, { lat, lon });
 
-    if (d < SERVER_MIN_MOVE && dt < SERVER_MIN_SECONDS) {
+    if (heartbeat) {
+      const when = new Date(ts).toLocaleTimeString();
+      console.log(
+        `💓 heartbeat de ${id}: ${lat.toFixed(6)}, ${lon.toFixed(6)} [${when}]`
+      );
+
+      lastByUser.set(id, { lat, lon, ts });
+
+      const loc = { userId: id, lat, lon, ts };
+      ioHttp?.to(`user:${id}`).emit("selfLocation", loc);
+      ioHttps?.to(`user:${id}`).emit("selfLocation", loc);
+      ioHttp?.to("admins").emit("locationUpdate", loc);
+      ioHttps?.to("admins").emit("locationUpdate", loc);
+
+      return res.send({ ok: true, heartbeat: true });
+    }
+
+    // si viene marcado como heartbeat (ts muy reciente pero sin movimiento), igual dejalo pasar
+    if (!heartbeat && d < SERVER_MIN_MOVE && dt < SERVER_MIN_SECONDS) {
       return res.send({ ok: true, skipped: "small_move" });
     }
 
@@ -234,13 +253,13 @@ function handleLocation(req, res) {
   const loc = { userId: id, lat, lon, ts };
   lastByUser.set(id, loc);
 
-// solo el dueño ve su ubicación (en su app)
-ioHttp?.to(`user:${id}`).emit("selfLocation", loc);
-ioHttps?.to(`user:${id}`).emit("selfLocation", loc);
+  // solo el dueño ve su ubicación (en su app)
+  ioHttp?.to(`user:${id}`).emit("selfLocation", loc);
+  ioHttps?.to(`user:${id}`).emit("selfLocation", loc);
 
-// los admins ven todo
-ioHttp?.to("admins").emit("locationUpdate", loc);
-ioHttps?.to("admins").emit("locationUpdate", loc);
+  // los admins ven todo
+  ioHttp?.to("admins").emit("locationUpdate", loc);
+  ioHttps?.to("admins").emit("locationUpdate", loc);
 
   console.log(`📥 ${id} -> ${lat.toFixed(6)}, ${lon.toFixed(6)} [${new Date(ts).toLocaleTimeString()}]`);
   res.send({ ok: true });
@@ -331,7 +350,6 @@ appHttp.post("/auth/login", (req, res) => {
 // === servir también el web-viewer por HTTP (para túnel free) ===
 appHttp.use(express.static(WEB_ROOT, { extensions: ["html"] }));
 
-
 appHttp.post("/location", handleLocation);
 appHttp.get("/health", (_req, res) => res.send("OK"));
 
@@ -368,7 +386,7 @@ ioHttp = new IOServer(httpServer, { cors: { origin: "*" } });
 // HTTP (API móvil)
 ioHttp.on("connection", (socket) => {
   console.log("Socket HTTP 9878 conectado:", socket.id);
-
+  console.log(`[${new Date().toLocaleTimeString()}]`)
   socket.on("hello", ({ role, userId, token } = {}) => {
     if (role === "admin") {
       const ok = process.env.ADMIN_TOKEN && token === process.env.ADMIN_TOKEN;
