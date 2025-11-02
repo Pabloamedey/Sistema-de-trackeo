@@ -1,6 +1,4 @@
 // App.js
-// import * as Sharing from "expo-sharing";
-//import * as IntentLauncher from "expo-intent-launcher"; // Android
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as Clipboard from "expo-clipboard";
 import Constants from "expo-constants";
@@ -9,12 +7,11 @@ import * as FileSystem from "expo-file-system/legacy";
 import * as Location from "expo-location";
 import * as MediaLibrary from "expo-media-library";
 import { useEffect, useRef, useState } from "react";
-import { Alert, Button, Linking, Platform, StyleSheet, Text, View } from "react-native";
+import { Alert, Button, Linking, Modal, Platform, ScrollView, StyleSheet, Text, TouchableOpacity, View } from "react-native";
 import 'react-native-get-random-values';
 import MapView, { Marker, Polyline } from "react-native-maps";
 import { io } from "socket.io-client";
 import { v4 as uuidv4 } from "uuid";
-
 
 // Evitar logs repetidos de valores iguales
 const lastLogs = new Map();
@@ -83,6 +80,12 @@ export default function App() {
   const lastSentRef = useRef({ coord: null, ts: 0 });
   const moveConfirmRef = useRef(0);
   const sessionActiveRef = useRef(false);
+  // menus y botones
+  const [showMenu, setShowMenu] = useState(false);
+  const [sessionsModalVisible, setSessionsModalVisible] = useState(false);
+  const [savedSessions, setSavedSessions] = useState([]);
+  const [elapsedSec, setElapsedSec] = useState(0);
+  const timerRef = useRef(null);
 
   const GIST_USER = "Pabloamedey";
   const GIST_ID   = "123f37bd1e8b7b1612f2f567d5cf0e49";
@@ -368,6 +371,33 @@ export default function App() {
       }),
     });
   }
+
+  useEffect(() => {
+    // cuando empieza a trackear → arrancamos timer
+    if (tracking) {
+      // limpiamos uno viejo si había
+      if (timerRef.current) {
+        clearInterval(timerRef.current);
+      }
+      // arrancamos en 0
+      setElapsedSec(0);
+      timerRef.current = setInterval(() => {
+        setElapsedSec((prev) => prev + 1);
+      }, 1000);
+    } else {
+      // cuando detiene → paramos y reseteamos
+      if (timerRef.current) {
+        clearInterval(timerRef.current);
+      }
+      setElapsedSec(0);
+    }
+
+    return () => {
+      if (timerRef.current) {
+        clearInterval(timerRef.current);
+      }
+    };
+  }, [tracking]);
 
    // ====== Funciones para sesiones ======
   const startSession = () => {
@@ -711,86 +741,564 @@ export default function App() {
         return;
       }
 
-      // mostramos las últimas 3 nomás para no hacer un choclo
-      const last3 = arr.slice(-3).reverse();
-      const msg = last3
-        .map((s, i) => {
-          const dKm = (s.distance / 1000).toFixed(2);
-          return `${i + 1}. ${s.at} — ${dKm} km`;
-        })
-        .join("\n");
+      // más nuevas primero
+      const sorted = [...arr].sort(
+        (a, b) => new Date(b.at).getTime() - new Date(a.at).getTime()
+      );
 
-      Alert.alert("Sesiones guardadas", msg);
+      setSavedSessions(sorted);
+      setSessionsModalVisible(true);
     } catch (e) {
       Alert.alert("Error", "No pude leer las sesiones: " + e.message);
     }
   };
 
+    // Construye una URL de Google Maps con la ubicación actual
+    const buildMapsUrl = (lat, lon) =>
+      `https://www.google.com/maps?q=${lat},${lon}`;
+
+    // Abre el cliente de correo con los datos prellenados
+    const shareCurrentLocationByEmail = async () => {
+      if (!myCoord) {
+        Alert.alert("Sin ubicación", "Todavía no tengo una posición válida.");
+        return;
+      }
+
+      const lat = myCoord.latitude.toFixed(6);
+      const lon = myCoord.longitude.toFixed(6);
+      const mapsUrl = buildMapsUrl(lat, lon);
+
+      // opcional: link al visor web (si lo resolvió)
+      const viewer = serverUrl ? `${serverUrl.replace(/\/+$/, "")}/` : "";
+
+      const subject = encodeURIComponent(
+        `Ubicación actual de ${userId}`
+      );
+
+      const bodyLines = [
+        `Dispositivo: ${userId}`,
+        `Latitud: ${lat}`,
+        `Longitud: ${lon}`,
+        "",
+        `Ver en Google Maps: ${mapsUrl}`,
+      ];
+
+      if (viewer) {
+        bodyLines.push("", `Ver en visor web: ${viewer}`);
+      }
+
+      const body = encodeURIComponent(bodyLines.join("\n"));
+
+      const mailto = `mailto:?subject=${subject}&body=${body}`;
+
+      try {
+        const canOpen = await Linking.canOpenURL(mailto);
+        if (canOpen) {
+          await Linking.openURL(mailto);
+        } else {
+          Alert.alert("No se pudo abrir el correo");
+        }
+      } catch (e) {
+        Alert.alert("Error", "No se pudo abrir el cliente de correo: " + e.message);
+      }
+    };
+
+  // velocidad
   const toKmh = (ms) => (ms * 3.6).toFixed(1);
+  // distnacia
   const formatDistance = (m) => {
-    if (!m || m <= 0) return "0.00 km";
-    return `${(m / 1000).toFixed(2)} km`;
+    if (!m || m <= 0) return "0.000 km";
+    return `${(m / 1000).toFixed(3)} km`;
   };
 
+  const formatDuration = (sec) => {
+    const h = Math.floor(sec / 3600);
+    const m = Math.floor((sec % 3600) / 60);
+    const s = sec % 60;
+    if (h > 0) {
+      return `${h.toString().padStart(2,"0")}:${m
+        .toString()
+        .padStart(2,"0")}:${s.toString().padStart(2,"0")}`;
+    }
+    return `${m.toString().padStart(2,"0")}:${s.toString().padStart(2,"0")}`;
+  };
   
-  return (
-    <View style={{ flex: 1 }}>
-      {Platform.OS !== "web" ? (
-        initialRegion ? (
-          <MapView ref={mapRef} style={{ flex: 1 }} initialRegion={initialRegion}>
-            {myCoord && <Marker coordinate={myCoord} title={`📱 ${userId}`} pinColor="blue" />}
-            {targetCoord && <Marker coordinate={targetCoord} title="📍 Tracker seguido" />}
-            {path.length > 1 && <Polyline coordinates={path} />}
-          </MapView>
-        ) : (
-          <View style={{ flex: 1, alignItems: "center", justifyContent: "center" }}>
-            <Text>Cargando ubicación inicial...</Text>
-          </View>
-        )
+return (
+  <View style={styles.container}>
+    {/* Mapa */}
+    {Platform.OS !== "web" ? (
+      initialRegion ? (
+        <MapView ref={mapRef} style={styles.map} initialRegion={initialRegion}>
+          {myCoord && (
+            <Marker
+              coordinate={myCoord}
+              title={`📱 ${userId}`}
+              pinColor="blue"
+            />
+          )}
+          {targetCoord && (
+            <Marker coordinate={targetCoord} title="📍 Tracker seguido" />
+          )}
+          {path.length > 1 && <Polyline coordinates={path} />}
+        </MapView>
       ) : (
-        <View style={{ flex: 1, alignItems: "center", justifyContent: "center" }}>
-          <Text>El mapa nativo no corre en web. Probalo en Expo Go.</Text>
+        <View style={styles.centered}>
+          <Text style={styles.centeredText}>Cargando ubicación inicial...</Text>
+        </View>
+      )
+    ) : (
+      <View style={styles.centered}>
+        <Text style={styles.centeredText}>
+          El mapa nativo no corre en web. Probalo en Expo Go.
+        </Text>
+      </View>
+    )}
+
+    {/* BOTÓN DE MENÚ ARRIBA A LA DERECHA */}
+    <View style={styles.topMenuContainer}>
+      <TouchableOpacity
+        style={styles.menuButton}
+        onPress={() => setShowMenu((prev) => !prev)}
+        activeOpacity={0.8}
+      >
+        <Text style={styles.menuIcon}>☰</Text>
+      </TouchableOpacity>
+
+      {showMenu && (
+        <View style={styles.dropdownMenu}>
+          <TouchableOpacity
+            style={styles.dropdownItem}
+            onPress={() => {
+              openViewerInBrowser();
+              setShowMenu(false);
+            }}
+          >
+            <Text style={styles.dropdownText}>Visor web (solo admin)</Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={styles.dropdownItem}
+            onPress={() => {
+              copyViewerUrl();
+              setShowMenu(false);
+            }}
+          >
+            <Text style={styles.dropdownText}>Copiar URL (solo admin)</Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={styles.dropdownItem}
+            onPress={() => {
+              showSavedSessions();
+              setShowMenu(false);
+            }}
+          >
+            <Text style={styles.dropdownText}>Sesiones guardadas</Text>
+          </TouchableOpacity>
+
+          {/* 👇 NUEVO: compartir por mail */}
+          <TouchableOpacity
+            style={styles.dropdownItem}
+            onPress={() => {
+              shareCurrentLocationByEmail();
+              setShowMenu(false);
+            }}
+          >
+            <Text style={styles.dropdownText}>Compartir ubicación por mail</Text>
+          </TouchableOpacity>
         </View>
       )}
+    </View>
 
-      <View style={styles.controls}>
-        <Button
-          title={tracking ? "Detener" : "Iniciar seguimiento"}
-          onPress={tracking ? stopTracking : startTracking}
-        />
-        <Text style={styles.info}>
-          ID: {userId}
-          {"\n"}
-          Yo:{" "}
-          {myCoord
-            ? `${myCoord.latitude.toFixed(5)}, ${myCoord.longitude.toFixed(5)}`
-            : "—"}
+    {/* MÉTRICAS FLOTANDO SOBRE EL MAPA (fuera del panel) */}
+    <View style={styles.metricsFloating}>
+      <View style={styles.metricCard}>
+        <Text style={styles.metricLabel}>Tiempo</Text>
+        <Text style={styles.metricValue}>{formatDuration(elapsedSec)}</Text>
+        <Text style={styles.metricSmall}>sesión</Text>
+      </View>
+
+      <View style={styles.metricCard}>
+        <Text style={styles.metricLabel}>Distancia</Text>
+        <Text style={styles.metricValue}>
+          {formatDistance(session.distance)}
         </Text>
-        <View style={{ marginTop: 8, gap: 8 }}>
-          <Button title="Abrir visor web" onPress={openViewerInBrowser} />
-          <Button title="Copiar URL del visor" onPress={copyViewerUrl} />
-        </View>
-        <Text style={styles.info}>
-          Distancia sesión: {formatDistance(session.distance)}{"\n"}
-          Vel. actual: {toKmh(currentSpeed)} km/h{"\n"}
-          Vel. promedio: {toKmh(session.avgSpeed)} km/h{"\n"}
+        <Text style={styles.metricSmall}>total</Text>
+      </View>
+
+      <View style={styles.metricCard}>
+        <Text style={styles.metricLabel}>Velocidad actual</Text>
+        <Text style={styles.metricValue}>
+          {toKmh(currentSpeed)} km/h
         </Text>
-        <Button title="Guardar recorrido" onPress={saveSessionToDevice} />
-        <Button title="Ver sesiones guardadas" onPress={showSavedSessions} />
+      </View>
+
+      <View style={styles.metricCard}>
+        <Text style={styles.metricLabel}>Velocidad prom.</Text>
+        <Text style={styles.metricValue}>
+          {toKmh(session.avgSpeed)} km/h
+        </Text>
+        <Text style={styles.metricSmall}>últimos puntos</Text>
       </View>
     </View>
-  );
+
+    {/* PANEL DE ABAJO */}
+    <View style={styles.bottomSheet}>
+      <View style={styles.sheetHeader}>
+        <View style={styles.headerRow}>
+          <View>
+            <Text style={styles.sheetTitle}>
+              {tracking ? "Seguimiento activo" : "Listo para correr"}
+            </Text>
+            <Text style={styles.sheetSubtitle}>
+              {tracking
+                ? "Enviando posición al servidor"
+                : "Tocá el botón para comenzar"}
+            </Text>
+          </View>
+
+          {/* Botón guardar recorrido — chico y a la derecha */}
+          <TouchableOpacity
+            style={
+              session.points && session.points.length > 0
+                ? styles.saveButton
+                : [styles.saveButton, styles.saveButtonDisabled]
+            }
+            onPress={saveSessionToDevice}
+            disabled={!session.points || session.points.length === 0}
+            activeOpacity={0.8}
+          >
+            <Text
+              style={
+                session.points && session.points.length > 0
+                  ? styles.saveButtonText
+                  : [styles.saveButtonText, styles.saveButtonTextDisabled]
+              }
+            >
+            Guardar recorrido
+            </Text>
+          </TouchableOpacity>
+        </View>
+
+        {/* Coordenadas debajo */}
+        {myCoord && (
+          <Text style={styles.coordText}>
+            Lat: {myCoord.latitude.toFixed(6)} | Lon: {myCoord.longitude.toFixed(6)}
+          </Text>
+        )}
+      </View>
+      {/* Botón principal */}
+      <View style={styles.mainButtonWrapper}>
+        <View style={styles.mainButtonShadow}>
+          <Button
+            title={tracking ? "Detener" : "Iniciar seguimiento"}
+            onPress={tracking ? stopTracking : startTracking}
+            color={
+              Platform.OS === "ios"
+                ? undefined
+                : tracking
+                ? "#DC2626"
+                : "#22C55E"
+            }
+          />
+        </View>
+      </View>
+    </View>
+
+    {/* MODAL: Sesiones guardadas */}
+    <Modal
+      visible={sessionsModalVisible}
+      animationType="slide"
+      transparent
+      onRequestClose={() => setSessionsModalVisible(false)}
+    >
+      <View style={styles.modalOverlay}>
+        <View style={styles.modalCard}>
+          <View style={styles.modalHeader}>
+            <Text style={styles.modalTitle}>Sesiones guardadas</Text>
+            <TouchableOpacity onPress={() => setSessionsModalVisible(false)}>
+              <Text style={styles.modalClose}>×</Text>
+            </TouchableOpacity>
+          </View>
+
+          <ScrollView style={styles.modalBody}>
+            {savedSessions.map((s, index) => {
+              const d = new Date(s.at);
+              const dateStr = d.toLocaleString();
+              const distKm = (s.distance / 1000).toFixed(2);
+
+              // duración y pace
+              let durationStr = "—";
+              let paceStr = "—";
+              if (s.points && s.points.length > 1) {
+                const start = s.points[0].ts;
+                const end = s.points[s.points.length - 1].ts;
+                const durSec = Math.max(0, (end - start) / 1000);
+                durationStr = formatDuration(durSec);
+
+                if (s.distance > 0) {
+                  const minTotal = durSec / 60;
+                  const pace = minTotal / (s.distance / 1000);
+                  const paceMin = Math.floor(pace);
+                  const paceSec = Math.round((pace - paceMin) * 60);
+                  paceStr =
+                    paceMin.toString().padStart(2, "0") +
+                    ":" +
+                    paceSec.toString().padStart(2, "0") +
+                    " min/km";
+                }
+              }
+
+              return (
+                <View key={index} style={styles.sessionCard}>
+                  <Text style={styles.sessionCardTitle}>
+                    {index + 1}. {dateStr}
+                  </Text>
+                  <Text style={styles.sessionCardLine}>
+                    Distancia:{" "}
+                    <Text style={styles.sessionCardBold}>{distKm} km</Text>
+                  </Text>
+                  <Text style={styles.sessionCardLine}>
+                    Duración:{" "}
+                    <Text style={styles.sessionCardBold}>{durationStr}</Text>
+                  </Text>
+                  <Text style={styles.sessionCardLine}>
+                    Ritmo: <Text style={styles.sessionCardBold}>{paceStr}</Text>
+                  </Text>
+                </View>
+              );
+            })}
+          </ScrollView>
+        </View>
+      </View>
+    </Modal>
+  </View>
+);
+
 }
 
 const styles = StyleSheet.create({
-  controls: {
-    position: "absolute",
-    bottom: 16,
-    left: 16,
-    right: 16,
-    backgroundColor: "rgba(255,255,255,0.9)",
-    padding: 12,
-    borderRadius: 12,
+  container: {
+    flex: 1,
+    backgroundColor: "#0F172A",
   },
-  info: { marginTop: 8, fontSize: 12 },
+  map: {
+    flex: 1,
+  },
+  centered: {
+    flex: 1,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "#0F172A",
+  },
+  centeredText: {
+    color: "#fff",
+  },
+
+  // PANEL DE ABAJO
+  bottomSheet: {
+    position: "absolute",
+    bottom: 0,
+    left: 0,
+    right: 0,
+    backgroundColor: "rgba(248,249,252,0.97)",
+    borderTopLeftRadius: 24,
+    borderTopRightRadius: 24,
+    paddingHorizontal: 16,
+    paddingTop: 16,
+    paddingBottom: Platform.OS === "ios" ? 28 : 16,
+    gap: 12,
+  },
+  sheetHeader: {
+    marginBottom: 4,
+  },
+  sheetTitle: {
+    fontSize: 16,
+    fontWeight: "600",
+    color: "#0F172A",
+  },
+  sheetSubtitle: {
+    fontSize: 12,
+    color: "rgba(15,23,42,0.6)",
+    marginTop: 2,
+  },
+  mainButtonWrapper: {
+    marginTop: 6,
+  },
+  mainButtonShadow: {
+    borderRadius: 999,
+    overflow: "hidden",
+    elevation: 2,
+  },
+  headerRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+  },
+
+  saveButton: {
+    width: 130,
+    height: 38,
+    borderRadius: 18,
+    backgroundColor: "rgba(15,23,42,0.1)",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  saveButtonDisabled: {
+    backgroundColor: "rgba(15,23,42,0.04)",
+  },
+  saveButtonText: {
+    color: "#0F172A",
+    fontWeight: "700",
+    fontSize: 14,
+  },
+  saveButtonTextDisabled: {
+    color: "rgba(15,23,42,0.3)",
+  },
+
+  // MÉTRICAS FLOTANTES SOBRE EL MAPA (las 4)
+  metricsFloating: {
+    position: "absolute",
+    bottom: 155,
+    left: 13,
+    right: 13,
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 5,
+  },
+  metricCard: {
+    flex: 1,
+    minWidth: 140,
+    backgroundColor: "rgba(15,23,42,0.85)",
+    borderRadius: 14,
+    padding: 10,
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.05)",
+  },
+  metricLabel: {
+    color: "rgba(255,255,255,0.7)",
+    fontSize: 11,
+  },
+  metricValue: {
+    color: "#fff",
+    fontSize: 18,
+    fontWeight: "700",
+    marginTop: 4,
+  },
+  metricSmall: {
+    color: "rgba(255,255,255,0.5)",
+    fontSize: 10,
+    marginTop: 4,
+  },
+
+  // MENÚ ARRIBA A LA DERECHA
+  topMenuContainer: {
+    position: "absolute",
+    top: Platform.OS === "ios" ? 52 : 32,
+    right: 16,
+    zIndex: 50,
+    alignItems: "flex-end",
+  },
+  menuButton: {
+    width: 44,
+    height: 44,
+    backgroundColor: "rgba(15,23,42,0.9)",
+    borderRadius: 22,
+    justifyContent: "center",
+    alignItems: "center",
+    shadowColor: "#000",
+    shadowOpacity: 0.2,
+    shadowRadius: 6,
+    shadowOffset: { width: 0, height: 3 },
+    elevation: 6,
+  },
+  menuIcon: {
+    color: "#fff",
+    fontSize: 20,
+    fontWeight: "600",
+  },
+  dropdownMenu: {
+    marginTop: 8,
+    backgroundColor: "#fff",
+    borderRadius: 12,
+    paddingVertical: 6,
+    width: 180,
+    borderWidth: 1,
+    borderColor: "rgba(15,23,42,0.1)",
+    shadowColor: "#000",
+    shadowOpacity: 0.15,
+    shadowRadius: 10,
+    shadowOffset: { width: -2, height: 4 },
+    elevation: 8,
+  },
+  dropdownItem: {
+    width: "100%",
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+  },
+  dropdownText: {
+    fontSize: 13,
+    color: "#0F172A",
+  },
+
+  // MODAL
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: "rgba(0,0,0,0.35)",
+    justifyContent: "flex-end",
+  },
+  modalCard: {
+    maxHeight: "75%",
+    backgroundColor: "#fff",
+    borderTopLeftRadius: 20,
+    borderTopRightRadius: 20,
+    paddingHorizontal: 16,
+    paddingTop: 12,
+    paddingBottom: 24,
+  },
+  modalHeader: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    marginBottom: 12,
+  },
+  modalTitle: {
+    fontSize: 16,
+    fontWeight: "600",
+    color: "#0F172A",
+  },
+  modalClose: {
+    fontSize: 26,
+    lineHeight: 26,
+    paddingHorizontal: 6,
+    color: "#0F172A",
+  },
+  modalBody: {
+    maxHeight: "100%",
+  },
+  sessionCard: {
+    backgroundColor: "rgba(15,23,42,0.03)",
+    borderRadius: 12,
+    padding: 10,
+    marginBottom: 10,
+  },
+  sessionCardTitle: {
+    fontWeight: "600",
+    color: "#0F172A",
+  },
+  sessionCardLine: {
+    fontSize: 12,
+    color: "rgba(15,23,42,0.7)",
+    marginTop: 4,
+  },
+  sessionCardBold: {
+    fontWeight: "600",
+    color: "#0F172A",
+  },
+  coordText: {
+    fontSize: 12,
+    color: "rgba(15,23,42,0.5)",
+    marginTop: 2,
+  },
+
 });

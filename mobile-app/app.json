@@ -42,18 +42,11 @@
             "backgroundColor": "#000000"
           }
         }
-      ],
-      "expo-barcode-scanner"
+      ]
     ],
     "experiments": {
       "typedRoutes": true,
       "reactCompiler": true
-    },
-    "extra": {
-      "router": {},
-      "eas": {
-        "projectId": "343780ba-8a51-4e8b-8f71-b83a10c5e78c"
-      }
     }
   }
 }
